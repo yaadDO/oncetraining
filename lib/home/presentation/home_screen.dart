@@ -3,6 +3,8 @@ import '../../bluetooth/presentation/device_scan_screen.dart';
 import '../../bluetooth/services/bluetooth_service.dart';
 import '../../cycle/presentation/pages/cycle_screen.dart';
 import '../../history/presentation/history_screen.dart';
+import '../../planner/domain/ride_plan.dart';
+import '../../planner/presentation/training_follow_screen.dart';
 import '../../planner/presentation/training_plans_screen.dart';
 import '../../settings/presentation/user_settings_screen.dart';
 
@@ -64,8 +66,18 @@ class HomeScreen extends StatelessWidget {
 
                     _buildActionButton(
                       context,
+                      icon: Icons.assignment,
+                      label: 'FOLLOW PLAN',
+                      color: Colors.deepOrange,
+                      onPressed: () => _navigateToTrainingPlans(context),
+                    ),
+
+                    const SizedBox(height: 25),
+
+                    _buildActionButton(
+                      context,
                       icon: Icons.fitness_center,
-                      label: 'TRAINING PLANS',
+                      label: 'CREATE PLAN',
                       color: Colors.deepPurple,
                       onPressed: () => _navigateTo(context, TrainingPlansScreen()),
                     ),
@@ -257,6 +269,22 @@ class HomeScreen extends StatelessWidget {
             )),
       ],
     );
+  }
+
+  void _navigateToTrainingPlans(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => TrainingPlansScreen()),
+    ).then((selectedPlan) {
+      if (selectedPlan != null && selectedPlan is RidePlan) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => TrainingFollowScreen(plan: selectedPlan),
+          ),
+        );
+      }
+    });
   }
 
   Widget _buildActionButton(BuildContext context, {

@@ -4,8 +4,34 @@ import 'home/presentation/home_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Permission.locationWhenInUse.request();
+
+  // Request all necessary permissions at startup
+  await _requestAllPermissions();
+
   runApp(MyApp());
+}
+
+Future<void> _requestAllPermissions() async {
+  try {
+    print('Requesting startup permissions...');
+
+    // Request location permission
+    var locationStatus = await Permission.locationWhenInUse.status;
+    if (locationStatus.isDenied) {
+      locationStatus = await Permission.locationWhenInUse.request();
+    }
+
+    // Request Bluetooth permissions
+    final bluetoothPermissions = await [
+      Permission.bluetooth,
+      Permission.bluetoothConnect,
+      Permission.bluetoothScan,
+    ].request();
+
+    print('Startup permission request completed');
+  } catch (e) {
+    print('Error in startup permission request: $e');
+  }
 }
 
 class MyApp extends StatelessWidget {

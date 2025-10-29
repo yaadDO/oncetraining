@@ -129,7 +129,40 @@ class DeviceScanScreenState extends State<DeviceScanScreen>
   }
 
   void _connectToDevice(BluetoothDevice device) async {
-    Navigator.pop(context, device);
+    // Stop scanning when connecting
+    _stopScan();
+
+    // Show connecting dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.blue.shade800,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text('Connecting...', style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Colors.white),
+            SizedBox(height: 16),
+            Text('Connecting to ${device.name ?? 'device'}...',
+                style: TextStyle(color: Colors.white70)),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      // Wait a moment for the dialog to show
+      await Future.delayed(Duration(milliseconds: 500));
+
+      // Return the device to the previous screen
+      Navigator.pop(context); // Close the dialog
+      Navigator.pop(context, device); // Return to cycle screen with device
+    } catch (e) {
+      Navigator.pop(context); // Close the dialog
+      Navigator.pop(context, device); // Still return the device
+    }
   }
 
   @override

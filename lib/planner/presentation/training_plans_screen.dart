@@ -1,5 +1,6 @@
 // training_plans_screen.dart
 import 'package:flutter/material.dart';
+import 'package:oncetraining/planner/presentation/training_follow_screen.dart';
 import '../domain/ride_plan.dart';
 import '../services/plan_storage_service.dart';
 import 'plan_maker_screen.dart';
@@ -183,7 +184,21 @@ class _TrainingPlansScreenState extends State<TrainingPlansScreen> {
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(20),
-          onTap: () => Navigator.pop(context, plan),
+          onTap: () {
+            if (Navigator.of(context).canPop()) {
+              // If used as a selection screen, return the plan
+              Navigator.pop(context, plan);
+            } else {
+              // If used from home screen, navigate to follow screen
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => TrainingFollowScreen(plan: plan),
+                ),
+              );
+            }
+          },
+
           child: Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(

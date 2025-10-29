@@ -350,31 +350,19 @@ class CycleScreenController {
     }
   }
 
-  void updateSensorSpeed(double wheelRevs, double eventTime) {
-    if (lastWheelRevs > 0 && lastWheelTime > 0) {
-      final revolutions = wheelRevs - lastWheelRevs;
-      final timeDelta = (eventTime - lastWheelTime) / 1024.0; // Time in seconds
+  void updateSensorSpeed(double speedKmh) {
+    // Directly use the calculated speed from the Bluetooth service
+    rideData.currentSensorSpeed = speedKmh;
 
-      if (timeDelta > 0) {
-        // Calculate speed in m/s: (wheel revolutions * circumference) / time
-        final speedMs = (revolutions * rideData.wheelCircumference) / timeDelta;
-        // Convert to km/h
-        final speedKmh = speedMs * 3.6;
+    updateMetric('sensor_speed', speedKmh.toStringAsFixed(1));
 
-        rideData.currentSensorSpeed = speedKmh;
-        updateMetric('sensor_speed', speedKmh.toStringAsFixed(1));
-
-        // Update max speed if needed
-        if (speedKmh > rideData.maxSpeed) {
-          rideData.maxSpeed = speedKmh;
-          updateMetric('max_speed', rideData.maxSpeed.toStringAsFixed(1));
-        }
-      }
+    // Update max speed if needed
+    if (speedKmh > rideData.maxSpeed) {
+      rideData.maxSpeed = speedKmh;
+      updateMetric('max_speed', rideData.maxSpeed.toStringAsFixed(1));
     }
 
-    // Update last values
-    lastWheelRevs = wheelRevs;
-    lastWheelTime = eventTime;
+    print('Speed updated: ${speedKmh.toStringAsFixed(1)} km/h');
   }
 
   int _calculateHrZone(int heartRate) {
@@ -415,17 +403,42 @@ class CycleScreenController {
     }
   }
 
+  // Update the saveRideSession method in CycleScreenController
   Future<void> saveRideSession(BluetoothDevice? device) async {
-    if (rideStartTime == null || powerSamples.isEmpty) return;
+    // Don't save if no meaningful ride data exists
+    if (rideData.rideDuration.inSeconds < 5 && powerSamples.isEmpty) {
+      return;
+    }
+
+    // Calculate final averages before saving
+    if (powerSamples.isNotEmpty) {
+      final total = powerSamples.reduce((a, b) => a + b);
+      rideData.avgPower = total ~/ powerSamples.length;
+    }
+
+    if (heartRateSamples.isNotEmpty) {
+      final total = heartRateSamples.reduce((a, b) => a + b);
+      rideData.avgHeartRate = total ~/ heartRateSamples.length;
+    }
+
+    if (cadenceSamples.isNotEmpty) {
+      final total = cadenceSamples.reduce((a, b) => a + b);
+      rideData.avgCadence = total ~/ cadenceSamples.length;
+    }
+
+    // Calculate normalized power if we have enough samples
+    if (powerSamples.length >= 30) {
+      updateNormalisedPower();
+    }
 
     final session = RideSession(
       id: DateTime.now().toIso8601String(),
-      startTime: rideStartTime!,
+      startTime: rideStartTime ?? DateTime.now(),
       durationSeconds: rideData.rideDuration.inSeconds,
       avgPower: rideData.avgPower,
       maxPower: rideData.maxPower,
       deviceName: device?.name,
-      gpsPoints: [],
+      gpsPoints: [], // You might want to capture GPS points from rideService
       // Sensor data
       avgHeartRate: rideData.avgHeartRate,
       maxHeartRate: rideData.maxHeartRate,
