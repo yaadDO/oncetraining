@@ -28,6 +28,7 @@ class RideData {
   int lapAvgPower = 0;
   int lapAvgHeartRate = 0;
   int lapMaxPower = 0;
+  int lapAvgCadence = 0;
 
   // Last lap metrics
   int lastLapAvgPower = 0;
@@ -35,6 +36,8 @@ class RideData {
   double lastLapAvgSpeed = 0.0;
   double lastLapDistance = 0.0;
   Duration lastLapTime = Duration.zero;
+  int lastLapAvgHr = 0;
+  int lastLapAvgCadence = 0;
 
   // 3-second power
   int power3sAvg = 0;
@@ -44,12 +47,22 @@ class RideData {
   double lapNormalised = 0.0;
   int hrPercentageMax = 0;
   int hrZone = 0;
-  int lastLapAvgHr = 0;
-  int lastLapAvgCadence = 0;
-  int lapAvgCadence = 0;
 
   int currentHeartRate = 0;
   int currentCadence = 0;
   double currentSensorSpeed = 0.0;
   double wheelCircumference = 2.1;
+
+  int power10sAvg = 0;
+  int power20sAvg = 0;
+  int ftpZone = 0;
+
+  // New altitude metrics
+  double altitude = 0.0;
+  double altitudeGain = 0.0;
+  double maxAltitude = 0.0;
+  double lastAltitude = 0.0;
+
+  // Existing metrics we need to ensure are tracked
+  double lapMaxSpeed = 0.0;
 }

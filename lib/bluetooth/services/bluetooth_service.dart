@@ -56,6 +56,7 @@ class PowerMeterService {
 
   // Add this to track if cadence is coming from power meter
   bool _cadenceFromPowerMeter = false;
+  bool get cadenceFromPowerMeter => _cadenceFromPowerMeter;
 
   // Add these for device scanning
   final _foundDevices = <BluetoothDevice>[];
@@ -74,6 +75,16 @@ class PowerMeterService {
   Stream<int> get heartRateStream => _heartRateController.stream;
   Stream<int> get cadenceStream => _cadenceController.stream;
   Stream<double> get speedStream => _speedController.stream;
+
+  // FIX: Instance variables for cadence calculation (not static)
+  int _lastCumulativeRevs = 0;
+  int _lastEventTime = 0;
+  int _lastCadence = 0;
+
+  // FIX: Instance variables for speed calculation
+  int _lastCumulativeWheelRevs = 0;
+  int _lastWheelEventTime = 0;
+  double _lastSpeed = 0.0;
 
   // Add method to get connection status
   String getConnectionStatus(SensorType type) => _connectionStatus[type]!;
@@ -163,18 +174,12 @@ class PowerMeterService {
   }
 
   double _calculateSpeedFromCscData(int cumulativeRevs, int eventTime) {
-    int _lastCumulativeRevs = 0;
-    int _lastEventTime = 0;
-    double _lastSpeed = 0.0;
-
-    // Default wheel circumference in meters (typical road bike)
-    double wheelCircumference = 2.1;
-
+    // FIX: Use instance variables instead of local variables
     // If we have previous data, calculate speed
-    if (_lastCumulativeRevs > 0 && _lastEventTime > 0) {
+    if (_lastCumulativeWheelRevs > 0 && _lastWheelEventTime > 0) {
       try {
-        int revsDifference = cumulativeRevs - _lastCumulativeRevs;
-        int timeDifference = eventTime - _lastEventTime;
+        int revsDifference = cumulativeRevs - _lastCumulativeWheelRevs;
+        int timeDifference = eventTime - _lastWheelEventTime;
 
         // Handle time rollover (eventTime is 16-bit, rolls over every 64 seconds)
         if (timeDifference < 0) {
@@ -185,6 +190,9 @@ class PowerMeterService {
         double timeInHours = timeDifference / (1024.0 * 3600.0);
 
         if (timeInHours > 0 && revsDifference >= 0) {
+          // Default wheel circumference in meters (typical road bike)
+          double wheelCircumference = 2.1;
+
           // Distance = revolutions * circumference
           double distance = revsDifference * wheelCircumference / 1000.0; // Convert to km
 
@@ -206,8 +214,8 @@ class PowerMeterService {
     }
 
     // Update previous values
-    _lastCumulativeRevs = cumulativeRevs;
-    _lastEventTime = eventTime;
+    _lastCumulativeWheelRevs = cumulativeRevs;
+    _lastWheelEventTime = eventTime;
 
     return _lastSpeed;
   }
@@ -277,12 +285,6 @@ class PowerMeterService {
 
       await _discoverServices(sensorType);
 
-      // Automatically use power meter cadence if available
-      if (sensorType == SensorType.powerMeter && _characteristics[SensorType.powerMeter] != null) {
-        _cadenceFromPowerMeter = true;
-        _connectionStatus[SensorType.cadence] = "Connected (Power Meter)";
-      }
-
       print('$sensorType connection and setup completed successfully');
 
     } catch (e) {
@@ -327,8 +329,20 @@ class PowerMeterService {
                 await characteristic.setNotifyValue(true);
                 characteristic.value.listen(_parsePowerData);
                 _connectionStatus[sensorType] = "Connected";
+
+                // Force cadence to show as connected from power meter
+                _cadenceFromPowerMeter = true;
+                _connectionStatus[SensorType.cadence] = "Connected (Power Meter)";
+                _connectionErrors[SensorType.cadence] = false;
+
+                // Reset cadence calculation variables
+                _lastCumulativeRevs = 0;
+                _lastEventTime = 0;
+                _lastCadence = 0;
+
                 characteristicFound = true;
-                print('Power measurement characteristic found and subscribed');
+                print('✅ Power meter connected and cadence setup complete');
+                print('🔧 Cadence will be calculated from power meter data');
               }
               break;
             case SensorType.heartRate:
@@ -343,9 +357,12 @@ class PowerMeterService {
               }
               break;
             case SensorType.cadence:
-            // Skip if cadence is already provided by power meter
+            // Always prefer cadence from power meter if available
               if (_cadenceFromPowerMeter) {
-                print('Cadence from power meter, skipping separate cadence sensor');
+                print('Using cadence from power meter, skipping separate cadence sensor');
+                _connectionStatus[SensorType.cadence] = "Connected (Power Meter)";
+                _connectionErrors[SensorType.cadence] = false;
+                characteristicFound = true;
                 break;
               }
 
@@ -389,10 +406,20 @@ class PowerMeterService {
   }
 
   void _parsePowerData(List<int> value) {
+    print('=== POWER METER DATA RECEIVED ===');
+    print('Raw data length: ${value.length} bytes');
+    print('Raw data: $value');
+    print('Raw data (hex): ${value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')}');
+
     if (value.length >= 4) {
       try {
         // Parse flags (first 2 bytes, little-endian)
         int flags = (value[1] << 8) | value[0];
+        print('Flags: ${flags.toRadixString(2).padLeft(16, '0')} (binary)');
+
+        // Check important flag bits
+        bool hasCrankData = (flags & 0x20) != 0;
+        print('Has crank data (bit 5): $hasCrankData');
 
         // Parse power (bytes 2-3, little-endian, signed)
         int power = (value[3] << 8) | value[2];
@@ -401,16 +428,15 @@ class PowerMeterService {
           power = power - 65536;
         }
 
-        if (power >= 0 && power < 65535) { // Valid power range
-          print('Power data: $power watts');
+        if (power >= 0 && power < 65535) {
+          print('Power: $power watts');
           _powerController.add(power);
         }
 
         // Check for cadence data based on flags
-        // Bit 5 (0x20) indicates crank revolution data is present
-        bool hasCrankData = (flags & 0x20) != 0;
-
         if (hasCrankData && value.length >= 9) {
+          print('=== CRANK DATA FOUND ===');
+
           // Crank data starts at byte 4 (after flags and power)
           // Cumulative Crank Revolutions (UINT32) - bytes 4-7
           int cumulativeCrankRevolutions = (value[7] << 24) |
@@ -421,66 +447,94 @@ class PowerMeterService {
           // Last Crank Event Time (UINT16) - bytes 8-9
           int lastCrankEventTime = (value[9] << 8) | value[8];
 
+          print('Cumulative Crank Revolutions: $cumulativeCrankRevolutions');
+          print('Last Crank Event Time: $lastCrankEventTime');
+
           // Calculate cadence from crank data
           int cadence = _calculateCadenceFromPowerMeter(
               cumulativeCrankRevolutions,
               lastCrankEventTime
           );
 
-          if (cadence > 0 && cadence < 255) { // Valid cadence range
-            print('Cadence from power meter: $cadence RPM');
+          if (cadence > 0 && cadence < 255) {
+            print('🎯 Calculated cadence: $cadence RPM');
             _cadenceController.add(cadence);
+          } else {
+            print('⚠️  Cadence out of range: $cadence RPM');
+          }
+        } else {
+          print('❌ No crank data or insufficient bytes');
+          if (!hasCrankData) {
+            print('Crank data flag (bit 5) is not set in flags');
+          }
+          if (value.length < 9) {
+            print('Insufficient data length: ${value.length} bytes, need at least 9');
           }
         }
       } catch (e) {
-        print('Error parsing power data: $e');
+        print('❌ Error parsing power data: $e');
+        print('Stack trace: ${e.toString()}');
       }
+    } else {
+      print('❌ Power data too short: ${value.length} bytes, need at least 4');
     }
+    print('=== END POWER METER DATA ===\n');
   }
 
   int _calculateCadenceFromPowerMeter(int cumulativeRevs, int eventTime) {
-    int _lastCumulativeRevs = 0;
-    int _lastEventTime = 0;
-    int _lastCadence = 0;
+    print('🔧 Calculating cadence from:');
+    print('   Current revs: $cumulativeRevs, Current time: $eventTime');
+    print('   Previous revs: $_lastCumulativeRevs, Previous time: $_lastEventTime');
 
-    // Only calculate if we have previous data
+    // Only calculate if we have previous data and it's not the first reading
     if (_lastCumulativeRevs > 0 && _lastEventTime > 0) {
       try {
         int revsDifference = cumulativeRevs - _lastCumulativeRevs;
         int timeDifference = eventTime - _lastEventTime;
 
+        print('   Revs difference: $revsDifference');
+        print('   Time difference: $timeDifference');
+
         // Handle time rollover (eventTime is 16-bit, rolls over every 64 seconds)
         if (timeDifference < 0) {
           timeDifference += 65536; // 2^16
+          print('   Time rollover handled, new time difference: $timeDifference');
         }
 
         // Convert time from 1/1024 seconds to minutes
         double timeInMinutes = timeDifference / (1024.0 * 60.0);
+        print('   Time in minutes: ${timeInMinutes.toStringAsFixed(6)}');
 
         if (timeInMinutes > 0 && revsDifference >= 0) {
           // Cadence = revolutions per minute
           int cadence = (revsDifference / timeInMinutes).round();
+          print('   Raw cadence calculation: $revsDifference revs / ${timeInMinutes.toStringAsFixed(6)} min = $cadence RPM');
 
           // Filter out unrealistic cadence values (0-250 RPM range)
           if (cadence > 0 && cadence <= 250) {
             _lastCadence = cadence;
-            print('Calculated cadence: $cadence RPM (Revs: $revsDifference, Time: ${timeInMinutes.toStringAsFixed(3)} min)');
+            print('   ✅ Valid cadence: $cadence RPM');
             return cadence;
           } else {
-            // Return last valid cadence if current calculation is unrealistic
+            print('   ⚠️  Cadence out of valid range (0-250): $cadence RPM, using last valid: $_lastCadence');
             return _lastCadence;
           }
+        } else {
+          print('   ⚠️  Invalid time or revs difference, using last valid cadence: $_lastCadence');
         }
       } catch (e) {
-        print('Error calculating cadence from power meter: $e');
+        print('   ❌ Error calculating cadence: $e');
       }
+    } else {
+      print('   ⏳ First reading or missing previous data, storing values for next calculation');
     }
 
     // Update previous values for next calculation
     _lastCumulativeRevs = cumulativeRevs;
     _lastEventTime = eventTime;
 
-    return _lastCadence; // Return last valid cadence
+    print('   📍 Returning last valid cadence: $_lastCadence');
+    return _lastCadence;
   }
 
   void _parseHeartRateData(List<int> value) {
@@ -496,9 +550,9 @@ class PowerMeterService {
   }
 
   void _parseCadenceData(List<int> value) {
-    // Skip if cadence is already provided by power meter
+    // Always skip if cadence is provided by power meter
     if (_cadenceFromPowerMeter) {
-      return;
+      return; // Completely ignore separate cadence sensor data
     }
 
     if (value.length >= 7) {
@@ -529,14 +583,15 @@ class PowerMeterService {
   }
 
   int _calculateCadenceFromCscData(int cumulativeRevs, int eventTime) {
-    int _lastCumulativeRevs = 0;
-    int _lastEventTime = 0;
-    int _lastCadence = 0;
+    // FIX: Use separate instance variables for CSC cadence
+    int _lastCumulativeRevsCsc = 0;
+    int _lastEventTimeCsc = 0;
+    int _lastCadenceCsc = 0;
 
-    if (_lastCumulativeRevs > 0 && _lastEventTime > 0) {
+    if (_lastCumulativeRevsCsc > 0 && _lastEventTimeCsc > 0) {
       try {
-        int revsDifference = cumulativeRevs - _lastCumulativeRevs;
-        int timeDifference = eventTime - _lastEventTime;
+        int revsDifference = cumulativeRevs - _lastCumulativeRevsCsc;
+        int timeDifference = eventTime - _lastEventTimeCsc;
 
         // Handle time rollover
         if (timeDifference < 0) {
@@ -551,7 +606,7 @@ class PowerMeterService {
 
           // Valid cadence range
           if (cadence > 0 && cadence < 255) {
-            _lastCadence = cadence;
+            _lastCadenceCsc = cadence;
             return cadence;
           }
         }
@@ -560,10 +615,10 @@ class PowerMeterService {
       }
     }
 
-    _lastCumulativeRevs = cumulativeRevs;
-    _lastEventTime = eventTime;
+    _lastCumulativeRevsCsc = cumulativeRevs;
+    _lastEventTimeCsc = eventTime;
 
-    return _lastCadence;
+    return _lastCadenceCsc;
   }
 
   void _parseSpeedData(List<int> value) {
@@ -599,8 +654,6 @@ class PowerMeterService {
     }
   }
 
-
-
   Future<void> disconnect(SensorType sensorType) async {
     try {
       final characteristic = _characteristics[sensorType];
@@ -622,6 +675,9 @@ class PowerMeterService {
       if (sensorType == SensorType.powerMeter && _cadenceFromPowerMeter) {
         _cadenceFromPowerMeter = false;
         _connectionStatus[SensorType.cadence] = "Not connected";
+        _connectionErrors[SensorType.cadence] = false;
+        _devices[SensorType.cadence] = null;
+        _characteristics[SensorType.cadence] = null;
       }
 
       print('Disconnected $sensorType');

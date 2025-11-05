@@ -1,4 +1,3 @@
-// ride_controls.dart
 import 'package:flutter/material.dart';
 
 class RideControls extends StatelessWidget {
@@ -6,8 +5,7 @@ class RideControls extends StatelessWidget {
   final bool isLapActive;
   final VoidCallback onStartRide;
   final VoidCallback onStopRide;
-  final VoidCallback onStartLap;
-  final VoidCallback onStopLap;
+  final VoidCallback onLapPressed; // Single callback for lap
 
   const RideControls({
     super.key,
@@ -15,8 +13,7 @@ class RideControls extends StatelessWidget {
     required this.isLapActive,
     required this.onStartRide,
     required this.onStopRide,
-    required this.onStartLap,
-    required this.onStopLap,
+    required this.onLapPressed,
   });
 
   @override
@@ -44,19 +41,13 @@ class RideControls extends StatelessWidget {
                     [Colors.red, Colors.red.shade700],
                     onStopRide
                 ),
-              if (isRiding && !isLapActive)
+              // Single Lap button that toggles between LAP and STOP LAP
+              if (isRiding)
                 _buildActionButton(
-                    "START LAP",
+                    isLapActive ? "STOP LAP" : "LAP",
                     Icons.flag,
-                    [Colors.blueAccent, Colors.blue],
-                    onStartLap
-                ),
-              if (isRiding && isLapActive)
-                _buildActionButton(
-                    "STOP LAP",
-                    Icons.flag,
-                    [Colors.orange, Colors.orange.shade700],
-                    onStopLap
+                    isLapActive ? [Colors.orange, Colors.orange.shade700] : [Colors.blueAccent, Colors.blue],
+                    onLapPressed
                 ),
             ],
           ),

@@ -7,6 +7,7 @@ class RideSession {
   final String? deviceName;
   final List<Map<String, double>> gpsPoints;
 
+
   // Sensor metrics
   final int avgHeartRate;
   final int maxHeartRate;
@@ -24,6 +25,12 @@ class RideSession {
   final int power3sAvg;
   final double ftpPercentage;
   final int hrZone;
+  final int power10sAvg;
+  final int power20sAvg;
+  final int ftpZone;
+  final double altitude;
+  final double altitudeGain;
+  final double maxAltitude;
 
   RideSession({
     required this.id,
@@ -49,5 +56,13 @@ class RideSession {
     required this.power3sAvg,
     required this.ftpPercentage,
     required this.hrZone,
+
+    // New metrics with defaults
+    this.power10sAvg = 0,
+    this.power20sAvg = 0,
+    this.ftpZone = 0,
+    this.altitude = 0.0,
+    this.altitudeGain = 0.0,
+    this.maxAltitude = 0.0,
   });
 }

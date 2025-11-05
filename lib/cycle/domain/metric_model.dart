@@ -56,6 +56,12 @@ class MetricBlock {
       'last_lap_avg_cadence'].contains(key)) {
       return 'cadence';
     }
+    if (['power_10s_avg', 'power_20s_avg', 'ftp_zone'].contains(key)) {
+      return 'power';
+    }
+    if (['altitude', 'alt_gain', 'max_alt'].contains(key)) {
+      return 'altitude';
+    }
     if (['power', 'avg_power', 'max_power', 'lap_avg_power', 'lap_max_power',
       'power_3s_avg', 'normalised_power', 'watts_kg', 'ftp_percentage',
       'last_lap_avg_power', 'last_lap_max_power', 'lap_normalised'].contains(key)) {
@@ -120,10 +126,47 @@ class MetricBlock {
       case 'last_lap_avg_power': return 'Last Lap Avg Power';
       case 'last_lap_max_power': return 'Last Lap Max Power';
       case 'lap_normalised': return 'Lap Normalised Power';
+      case 'power_10s_avg': return '10s Avg Power';
+      case 'power_20s_avg': return '20s Avg Power';
+      case 'ftp_zone': return 'FTP Zone';
 
       case 'heart_rate': return 'Heart Rate';
       case 'cadence': return 'Cadence';
       case 'sensor_speed': return 'Speed (Sensor)';
+
+      case 'altitude': return 'Altitude';
+      case 'alt_gain': return 'Elevation Gain';
+      case 'max_alt': return 'Max Altitude';
+
+      case 'normalised_power': return 'Normalised Power';
+      case 'ftp_percentage': return '% FTP';
+      case 'avg_power': return 'Avg Power';
+      case 'max_power': return 'Max Power';
+      case 'last_lap_avg_power': return 'Last Lap Avg Power';
+      case 'last_lap_max_power': return 'Last Lap Max Power';
+      case 'avg_cadence': return 'Avg Cadence';
+      case 'max_cadence': return 'Max Cadence';
+      case 'lap_avg_cadence': return 'Lap Avg Cadence';
+      case 'last_lap_avg_cadence': return 'Last Lap Avg Cadence';
+      case 'avg_hr': return 'Avg Heart Rate';
+      case 'max_hr': return 'Max Heart Rate';
+      case 'hr_percentage_max': return '% Max HR';
+      case 'hr_zone': return 'HR Zone';
+      case 'lap_avg_hr': return 'Lap Avg HR';
+      case 'last_lap_avg_hr': return 'Last Lap Avg HR';
+      case 'kj': return 'KiloJoules';
+      case 'calories': return 'Calories';
+      case 'distance': return 'Distance';
+      case 'lap_distance': return 'Lap Distance';
+      case 'last_lap_distance': return 'Last Lap Distance';
+      case 'speed': return 'Speed';
+      case 'avg_speed': return 'Avg Speed';
+      case 'max_speed': return 'Max Speed';
+      case 'lap_avg_speed': return 'Lap Avg Speed';
+      case 'lap_max_speed': return 'Lap Max Speed';
+      case 'lap_time': return 'Lap Time';
+      case 'lap_count': return 'Lap Count';
+
 
       default: return key;
     }
@@ -188,6 +231,45 @@ class MetricBlock {
       case 'heart_rate': return 'bpm';
       case 'cadence': return 'rpm';
       case 'sensor_speed': return 'km/h';
+
+      case 'power_10s_avg': return 'W';
+      case 'power_20s_avg': return 'W';
+      case 'ftp_zone': return '';
+
+    // New altitude metrics
+      case 'altitude': return 'm';
+      case 'alt_gain': return 'm';
+      case 'max_alt': return 'm';
+
+    // Existing units
+      case 'normalised_power': return 'W';
+      case 'ftp_percentage': return '%';
+      case 'avg_power': return 'W';
+      case 'max_power': return 'W';
+      case 'last_lap_avg_power': return 'W';
+      case 'last_lap_max_power': return 'W';
+      case 'avg_cadence': return 'rpm';
+      case 'max_cadence': return 'rpm';
+      case 'lap_avg_cadence': return 'rpm';
+      case 'last_lap_avg_cadence': return 'rpm';
+      case 'avg_hr': return 'bpm';
+      case 'max_hr': return 'bpm';
+      case 'hr_percentage_max': return '%';
+      case 'hr_zone': return '';
+      case 'lap_avg_hr': return 'bpm';
+      case 'last_lap_avg_hr': return 'bpm';
+      case 'kj': return 'kJ';
+      case 'calories': return 'cal';
+      case 'distance': return 'km';
+      case 'lap_distance': return 'km';
+      case 'last_lap_distance': return 'km';
+      case 'speed': return 'km/h';
+      case 'avg_speed': return 'km/h';
+      case 'max_speed': return 'km/h';
+      case 'lap_avg_speed': return 'km/h';
+      case 'lap_max_speed': return 'km/h';
+      case 'lap_time': return '';
+      case 'lap_count': return '';
 
       default: return '';
     }
