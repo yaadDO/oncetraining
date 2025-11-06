@@ -1,16 +1,20 @@
-// [file name]: cycle_screen_controller.dart
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:geolocator/geolocator.dart'; // ADD THIS IMPORT
 
 import '../../../core/services/gpx_storage_service.dart';
 import '../../../core/services/preferences_service.dart';
 import '../../../core/utils/formatters.dart';
+import '../../../core/domain/sensor_type.dart'; // ADD THIS IMPORT
 import '../../domain/metric_model.dart';
 import '../../domain/ride_data.dart';
 import '../../domain/ride_session.dart';
 import '../../services/ride_service.dart';
+import '../../services/sensor_connection_manager.dart';
+import '../../services/timer_manager.dart';
+import '../../services/metrics_data_processor.dart';
+import '../../services/ride_state_manager.dart';
 
 class CycleScreenController {
   final RideData rideData = RideData();
@@ -18,41 +22,14 @@ class CycleScreenController {
   final GpxStorageService storageService;
   final PreferencesService preferencesService;
 
-  String connectionStatus = "";
-  bool isError = false;
+  final SensorConnectionManager sensorManager = SensorConnectionManager();
+  final TimerManager timerManager = TimerManager();
+  final MetricsDataProcessor dataProcessor = MetricsDataProcessor();
+  final RideStateManager rideState = RideStateManager();
+
   bool isLocationPermissionGranted = false;
   List<MetricBlock> displayedMetrics = [];
   List<MetricBlock> allMetrics = [];
-
-  Timer? rideTimer;
-  Timer? lapTimer;
-  DateTime? rideStartTime;
-  DateTime? lapStartTime;
-
-  // Data buffers
-  final List<int> powerSamples = [];
-  final List<int> lapPowerSamples = [];
-  final List<int> power3sBuffer = [];
-  final List<int> power10sBuffer = [];
-  final List<int> power20sBuffer = [];
-  final List<int> lapHeartRateSamples = [];
-  final List<int> lapCadenceSamples = [];
-  final List<int> lastLapPowerSamples = [];
-  final List<int> lastLapHeartRateSamples = [];
-  final List<int> lastLapCadenceSamples = [];
-
-  // Sensor data buffers
-  final List<int> heartRateSamples = [];
-  final List<int> cadenceSamples = [];
-  final List<int> sensorSpeedSamples = [];
-  double lastWheelRevs = 0.0;
-  double lastWheelTime = 0.0;
-
-  // Altitude tracking
-  double currentAltitude = 0.0;
-  double maxAltitude = 0.0;
-  double totalAltitudeGain = 0.0;
-  double lastRecordedAltitude = 0.0;
 
   // User settings (loaded from preferences)
   double userWeight = 70.0; // kg
@@ -141,20 +118,20 @@ class CycleScreenController {
   }
 
   void startRide() {
+    rideState.startRide();
     rideData.isRiding = true;
-    rideStartTime = DateTime.now();
-    rideData.rideDuration = Duration.zero;
 
     // Clear all buffers
-    powerSamples.clear();
-    heartRateSamples.clear();
-    cadenceSamples.clear();
-    sensorSpeedSamples.clear();
-    power3sBuffer.clear();
-    power10sBuffer.clear();
-    power20sBuffer.clear();
+    dataProcessor.clearAllBuffers();
 
     // Reset metrics
+    _resetRideMetrics();
+
+    rideService.reset();
+    resetLap();
+  }
+
+  void _resetRideMetrics() {
     rideData.avgPower = 0;
     rideData.maxPower = 0;
     rideData.powerKjoules = 0;
@@ -178,13 +155,10 @@ class CycleScreenController {
     rideData.lapMaxSpeed = 0.0;
 
     // Reset altitude
-    currentAltitude = 0.0;
-    maxAltitude = 0.0;
-    totalAltitudeGain = 0.0;
-    lastRecordedAltitude = 0.0;
-
-    rideService.reset();
-    resetLap();
+    dataProcessor.currentAltitude = 0.0;
+    dataProcessor.maxAltitude = 0.0;
+    dataProcessor.totalAltitudeGain = 0.0;
+    dataProcessor.lastRecordedAltitude = 0.0;
   }
 
   void resetLap() {
@@ -198,11 +172,7 @@ class CycleScreenController {
     rideData.lapNormalised = 0.0;
     rideData.lapMaxSpeed = 0.0;
 
-    lapPowerSamples.clear();
-    lapHeartRateSamples.clear();
-    lapCadenceSamples.clear();
-
-    lapStartTime = DateTime.now();
+    dataProcessor.clearLapBuffers();
 
     // Reset lap metrics display
     updateMetric('lap_time', formatDuration(rideData.lapDuration));
@@ -217,7 +187,7 @@ class CycleScreenController {
 
   void startLap() {
     // Save previous lap data if this isn't the first lap
-    if (lapTimer != null) {
+    if (timerManager.lapTimer != null) {
       calculateLapAverages();
 
       rideData.lastLapAvgPower = rideData.lapAvgPower;
@@ -245,10 +215,11 @@ class CycleScreenController {
     rideService.resetLap();
 
     resetLap();
+    rideState.startLap();
   }
 
   void stopLap() {
-    if (lapTimer != null) {
+    if (timerManager.lapTimer != null) {
       calculateLapAverages();
       updateLapNormalisedPower();
 
@@ -281,77 +252,70 @@ class CycleScreenController {
 
       print('Lap stopped - Avg Power: ${rideData.lapAvgPower}, Duration: ${rideData.lapDuration}');
     }
+    rideState.stopLap();
   }
 
   void calculateLapAverages() {
-    if (lapPowerSamples.isNotEmpty) {
-      final totalPower = lapPowerSamples.reduce((a, b) => a + b);
-      rideData.lapAvgPower = totalPower ~/ lapPowerSamples.length;
+    if (dataProcessor.lapPowerSamples.isNotEmpty) {
+      final totalPower = dataProcessor.lapPowerSamples.reduce((a, b) => a + b);
+      rideData.lapAvgPower = totalPower ~/ dataProcessor.lapPowerSamples.length;
     }
 
-    if (lapHeartRateSamples.isNotEmpty) {
-      final totalHR = lapHeartRateSamples.reduce((a, b) => a + b);
-      rideData.lapAvgHeartRate = totalHR ~/ lapHeartRateSamples.length;
+    if (dataProcessor.lapHeartRateSamples.isNotEmpty) {
+      final totalHR = dataProcessor.lapHeartRateSamples.reduce((a, b) => a + b);
+      rideData.lapAvgHeartRate = totalHR ~/ dataProcessor.lapHeartRateSamples.length;
     }
 
-    if (lapCadenceSamples.isNotEmpty) {
-      final totalCadence = lapCadenceSamples.reduce((a, b) => a + b);
-      rideData.lapAvgCadence = totalCadence ~/ lapCadenceSamples.length;
+    if (dataProcessor.lapCadenceSamples.isNotEmpty) {
+      final totalCadence = dataProcessor.lapCadenceSamples.reduce((a, b) => a + b);
+      rideData.lapAvgCadence = totalCadence ~/ dataProcessor.lapCadenceSamples.length;
     }
   }
 
-  void updatePowerAverages(int power) {
-    // Update 3s average
-    update3sPowerAvg(power);
+  void updatePowerData(int power) {
+    rideData.currentPower = power;
+    updateMetric('power', '$power');
+    updateWattsPerKilo();
 
-    // Update 10s average
-    power10sBuffer.add(power);
-    if (power10sBuffer.length > 10) {
-      power10sBuffer.removeAt(0);
+    if (rideData.isRiding) {
+      dataProcessor.powerSamples.add(power);
+
+      if (rideState.isLapActive) {
+        dataProcessor.lapPowerSamples.add(power);
+      }
+
+      if (power > rideData.maxPower) {
+        rideData.maxPower = power;
+      }
+      updateMetric('max_power', '${rideData.maxPower}');
+
+      updateAveragePower();
+      updateKiloJoules();
+      updateCalories();
+
+      dataProcessor.updatePowerAverages(
+        power,
+            (avg) {
+          rideData.power3sAvg = avg;
+          updateMetric('power_3s_avg', '$avg');
+        },
+            (avg) {
+          rideData.power10sAvg = avg;
+          updateMetric('power_10s_avg', '$avg');
+        },
+            (avg) {
+          rideData.power20sAvg = avg;
+          updateMetric('power_20s_avg', '$avg');
+        },
+      );
+
+      if (rideState.isLapActive && power > rideData.lapMaxPower) {
+        rideData.lapMaxPower = power;
+        updateMetric('lap_max_power', '${rideData.lapMaxPower}');
+      }
+
+      updateFtpZone();
     }
-    if (power10sBuffer.isNotEmpty) {
-      final total = power10sBuffer.reduce((a, b) => a + b);
-      rideData.power10sAvg = total ~/ power10sBuffer.length;
-      updateMetric('power_10s_avg', '${rideData.power10sAvg}');
-    }
-
-    // Update 20s average
-    power20sBuffer.add(power);
-    if (power20sBuffer.length > 20) {
-      power20sBuffer.removeAt(0);
-    }
-    if (power20sBuffer.isNotEmpty) {
-      final total = power20sBuffer.reduce((a, b) => a + b);
-      rideData.power20sAvg = total ~/ power20sBuffer.length;
-      updateMetric('power_20s_avg', '${rideData.power20sAvg}');
-    }
-
-    // Update FTP Zone
-    updateFtpZone();
-  }
-
-  void updateFtpZone() {
-    if (userFtp <= 0) return;
-
-    final percentage = (rideData.currentPower / userFtp) * 100;
-
-    if (percentage < 55) {
-      rideData.ftpZone = 1;
-    } else if (percentage < 75) {
-      rideData.ftpZone = 2;
-    } else if (percentage < 90) {
-      rideData.ftpZone = 3;
-    } else if (percentage < 105) {
-      rideData.ftpZone = 4;
-    } else if (percentage < 120) {
-      rideData.ftpZone = 5;
-    } else if (percentage < 150) {
-      rideData.ftpZone = 6;
-    } else {
-      rideData.ftpZone = 7;
-    }
-
-    updateMetric('ftp_zone', '${rideData.ftpZone}');
   }
 
   void updateWattsPerKilo() {
@@ -360,15 +324,13 @@ class CycleScreenController {
   }
 
   void updateCalories() {
-    // More accurate calorie calculation based on power
     final hours = rideData.rideDuration.inSeconds / 3600;
-    // Calories = power (watts) * time (hours) * 3.6
     rideData.calories = rideData.avgPower * hours * 3.6;
     updateMetric('calories', rideData.calories.toStringAsFixed(0));
   }
 
   void updateKiloJoules() {
-    rideData.powerKjoules = powerSamples.fold(0, (sum, power) => sum + power) ~/ 1000;
+    rideData.powerKjoules = dataProcessor.powerSamples.fold(0, (sum, power) => sum + power) ~/ 1000;
     updateMetric('kj', '${rideData.powerKjoules}');
   }
 
@@ -394,64 +356,31 @@ class CycleScreenController {
   }
 
   void updateAveragePower() {
-    if (powerSamples.isEmpty) return;
-    final total = powerSamples.reduce((a, b) => a + b);
-    rideData.avgPower = total ~/ powerSamples.length;
+    if (dataProcessor.powerSamples.isEmpty) return;
+    final total = dataProcessor.powerSamples.reduce((a, b) => a + b);
+    rideData.avgPower = total ~/ dataProcessor.powerSamples.length;
     updateMetric('avg_power', '${rideData.avgPower}');
   }
 
   void updateAverageHeartRate() {
-    if (heartRateSamples.isEmpty) return;
-    final total = heartRateSamples.reduce((a, b) => a + b);
-    rideData.avgHeartRate = total ~/ heartRateSamples.length;
+    if (dataProcessor.heartRateSamples.isEmpty) return;
+    final total = dataProcessor.heartRateSamples.reduce((a, b) => a + b);
+    rideData.avgHeartRate = total ~/ dataProcessor.heartRateSamples.length;
     updateMetric('avg_hr', '${rideData.avgHeartRate}');
   }
 
   void updateAverageCadence() {
-    if (cadenceSamples.isEmpty) return;
-    final total = cadenceSamples.reduce((a, b) => a + b);
-    rideData.avgCadence = total ~/ cadenceSamples.length;
+    if (dataProcessor.cadenceSamples.isEmpty) return;
+    final total = dataProcessor.cadenceSamples.reduce((a, b) => a + b);
+    rideData.avgCadence = total ~/ dataProcessor.cadenceSamples.length;
     updateMetric('avg_cadence', '${rideData.avgCadence}');
   }
 
-  void update3sPowerAvg(int power) {
-    // Add new power value to buffer
-    power3sBuffer.add(power);
-
-    // Keep only last 3 values (assuming 1 value per second)
-    if (power3sBuffer.length > 3) {
-      power3sBuffer.removeAt(0);
-    }
-
-    // Calculate average
-    if (power3sBuffer.isNotEmpty) {
-      final total = power3sBuffer.reduce((a, b) => a + b);
-      rideData.power3sAvg = total ~/ power3sBuffer.length;
-      updateMetric('power_3s_avg', '${rideData.power3sAvg}');
-    }
-  }
-
   void updateNormalisedPower() {
-    if (powerSamples.isEmpty) return;
-
-    // 1. Calculate 30-second rolling average
-    final List<double> rollingAverages = [];
-    for (int i = 0; i <= powerSamples.length - 30; i++) {
-      final sum = powerSamples.sublist(i, i + 30).reduce((a, b) => a + b);
-      rollingAverages.add(sum / 30);
+    if (dataProcessor.powerSamples.length >= 30) {
+      rideData.normalisedPower = dataProcessor.calculateNormalisedPower(dataProcessor.powerSamples);
+      updateMetric('normalised_power', rideData.normalisedPower.toStringAsFixed(0));
     }
-
-    if (rollingAverages.isEmpty) return;
-
-    // 2. Raise to 4th power
-    final raisedValues = rollingAverages.map((v) => pow(v, 4)).toList();
-
-    // 3. Calculate average of raised values
-    final avgRaised = raisedValues.reduce((a, b) => a + b) / raisedValues.length;
-
-    // 4. Take 4th root
-    rideData.normalisedPower = pow(avgRaised, 1/4).toDouble();
-    updateMetric('normalised_power', rideData.normalisedPower.toStringAsFixed(0));
   }
 
   void updateFtpPercentage() {
@@ -460,70 +389,61 @@ class CycleScreenController {
     updateMetric('ftp_percentage', rideData.ftpPercentage.toStringAsFixed(0));
   }
 
+  void updateFtpZone() {
+    if (userFtp <= 0) return;
+    final percentage = (rideData.currentPower / userFtp) * 100;
+    rideData.ftpZone = dataProcessor.calculateFtpZone(percentage);
+    updateMetric('ftp_zone', '${rideData.ftpZone}');
+  }
+
   void updateHrMetrics(int heartRate) {
     rideData.heartRate = heartRate;
+    updateMetric('hr', '$heartRate');
 
-    // Update max HR
     if (heartRate > rideData.maxHeartRate) {
       rideData.maxHeartRate = heartRate;
     }
+    updateMetric('max_hr', '${rideData.maxHeartRate}');
 
-    // Update HR % of max
     if (userMaxHr > 0) {
       rideData.hrPercentageMax = ((heartRate / userMaxHr) * 100).round();
     }
-
-    // Calculate HR zone
-    rideData.hrZone = _calculateHrZone(heartRate);
-
-    // Update metrics
-    updateMetric('hr', '$heartRate');
-    updateMetric('max_hr', '${rideData.maxHeartRate}');
     updateMetric('hr_percentage_max', '${rideData.hrPercentageMax}%');
+
+    rideData.hrZone = dataProcessor.calculateHrZone(heartRate, userMaxHr);
     updateMetric('hr_zone', '${rideData.hrZone}');
 
-    // Add to samples
-    heartRateSamples.add(heartRate);
-
-    if (lapTimer != null) {
-      lapHeartRateSamples.add(heartRate);
+    dataProcessor.heartRateSamples.add(heartRate);
+    if (rideState.isLapActive) {
+      dataProcessor.lapHeartRateSamples.add(heartRate);
     }
   }
 
   void updateCadenceMetrics(int cadence) {
     rideData.cadence = cadence;
+    updateMetric('cadence', '$cadence');
 
-    // Update max cadence
     if (cadence > rideData.maxCadence) {
       rideData.maxCadence = cadence;
     }
-
-    // Update metrics
-    updateMetric('cadence', '$cadence');
     updateMetric('max_cadence', '${rideData.maxCadence}');
 
-    // Add to samples
-    cadenceSamples.add(cadence);
-
-    if (lapTimer != null) {
-      lapCadenceSamples.add(cadence);
+    dataProcessor.cadenceSamples.add(cadence);
+    if (rideState.isLapActive) {
+      dataProcessor.lapCadenceSamples.add(cadence);
     }
   }
 
   void updateSensorSpeed(double speedKmh) {
-    // Directly use the calculated speed from the Bluetooth service
     rideData.currentSensorSpeed = speedKmh;
-
     updateMetric('sensor_speed', speedKmh.toStringAsFixed(1));
 
-    // Update max speed if needed
     if (speedKmh > rideData.maxSpeed) {
       rideData.maxSpeed = speedKmh;
       updateMetric('max_speed', rideData.maxSpeed.toStringAsFixed(1));
     }
 
-    // Update lap max speed if lap is active
-    if (lapTimer != null) {
+    if (rideState.isLapActive) {
       updateLapMaxSpeed(speedKmh);
     }
 
@@ -531,56 +451,26 @@ class CycleScreenController {
   }
 
   void updateAltitudeMetrics(double altitude) {
-    rideData.altitude = altitude;
-    currentAltitude = altitude;
-
-    // Update max altitude
-    if (altitude > maxAltitude) {
-      maxAltitude = altitude;
-      rideData.maxAltitude = maxAltitude;
-    }
-
-    // Calculate altitude gain (only count positive changes)
-    if (lastRecordedAltitude > 0) {
-      final gain = altitude - lastRecordedAltitude;
-      if (gain > 0) { // Only count ascending
-        totalAltitudeGain += gain;
-        rideData.altitudeGain = totalAltitudeGain;
-      }
-    }
-    lastRecordedAltitude = altitude;
-
-    // Update metrics
-    updateMetric('altitude', altitude.toStringAsFixed(0));
-    updateMetric('max_alt', maxAltitude.toStringAsFixed(0));
-    updateMetric('alt_gain', totalAltitudeGain.toStringAsFixed(0));
-  }
-
-  int _calculateHrZone(int heartRate) {
-    if (userMaxHr <= 0) return 0;
-
-    final percentage = (heartRate / userMaxHr) * 100;
-
-    if (percentage < 60) return 1;
-    if (percentage < 70) return 2;
-    if (percentage < 80) return 3;
-    if (percentage < 90) return 4;
-    return 5;
+    dataProcessor.updateAltitudeMetrics(
+      altitude,
+          (alt) {
+        rideData.altitude = alt;
+        updateMetric('altitude', alt.toStringAsFixed(0));
+      },
+          (maxAlt) {
+        rideData.maxAltitude = maxAlt;
+        updateMetric('max_alt', maxAlt.toStringAsFixed(0));
+      },
+          (gain) {
+        rideData.altitudeGain = gain;
+        updateMetric('alt_gain', gain.toStringAsFixed(0));
+      },
+    );
   }
 
   void updateLapNormalisedPower() {
-    if (lapPowerSamples.length >= 30) {
-      final List<double> rollingAverages = [];
-      for (int i = 0; i <= lapPowerSamples.length - 30; i++) {
-        final sum = lapPowerSamples.sublist(i, i + 30).reduce((a, b) => a + b);
-        rollingAverages.add(sum / 30);
-      }
-
-      if (rollingAverages.isEmpty) return;
-
-      final raisedValues = rollingAverages.map((v) => pow(v, 4)).toList();
-      final avgRaised = raisedValues.reduce((a, b) => a + b) / raisedValues.length;
-      rideData.lapNormalised = pow(avgRaised, 1/4).toDouble();
+    if (dataProcessor.lapPowerSamples.length >= 30) {
+      rideData.lapNormalised = dataProcessor.calculateNormalisedPower(dataProcessor.lapPowerSamples);
       updateMetric('lap_normalised', rideData.lapNormalised.toStringAsFixed(0));
     }
   }
@@ -593,47 +483,40 @@ class CycleScreenController {
   }
 
   Future<void> saveRideSession(BluetoothDevice? device) async {
-    // Don't save if no meaningful ride data exists
-    if (rideData.rideDuration.inSeconds < 5 && powerSamples.isEmpty) {
+    if (rideData.rideDuration.inSeconds < 5 && dataProcessor.powerSamples.isEmpty) {
       return;
     }
 
-    // Calculate final averages before saving
-    if (powerSamples.isNotEmpty) {
-      final total = powerSamples.reduce((a, b) => a + b);
-      rideData.avgPower = total ~/ powerSamples.length;
+    if (dataProcessor.powerSamples.isNotEmpty) {
+      final total = dataProcessor.powerSamples.reduce((a, b) => a + b);
+      rideData.avgPower = total ~/ dataProcessor.powerSamples.length;
     }
 
-    if (heartRateSamples.isNotEmpty) {
-      final total = heartRateSamples.reduce((a, b) => a + b);
-      rideData.avgHeartRate = total ~/ heartRateSamples.length;
+    if (dataProcessor.heartRateSamples.isNotEmpty) {
+      final total = dataProcessor.heartRateSamples.reduce((a, b) => a + b);
+      rideData.avgHeartRate = total ~/ dataProcessor.heartRateSamples.length;
     }
 
-    if (cadenceSamples.isNotEmpty) {
-      final total = cadenceSamples.reduce((a, b) => a + b);
-      rideData.avgCadence = total ~/ cadenceSamples.length;
+    if (dataProcessor.cadenceSamples.isNotEmpty) {
+      final total = dataProcessor.cadenceSamples.reduce((a, b) => a + b);
+      rideData.avgCadence = total ~/ dataProcessor.cadenceSamples.length;
     }
 
-    // Calculate normalized power if we have enough samples
-    if (powerSamples.length >= 30) {
+    if (dataProcessor.powerSamples.length >= 30) {
       updateNormalisedPower();
     }
 
-    // Ensure we have GPS data for Strava
     final gpsPoints = _getGpsPointsForSession();
-
-    // If we have very few GPS points, create interpolated points for Strava
     final enrichedGpsPoints = _enrichGpsPoints(gpsPoints);
 
     final session = RideSession(
       id: DateTime.now().toIso8601String(),
-      startTime: rideStartTime ?? DateTime.now(),
+      startTime: timerManager.rideStartTime ?? DateTime.now(),
       durationSeconds: rideData.rideDuration.inSeconds,
       avgPower: rideData.avgPower,
       maxPower: rideData.maxPower,
       deviceName: device?.name,
-      gpsPoints: enrichedGpsPoints, // Use enriched GPS points
-      // ... rest of your parameters
+      gpsPoints: enrichedGpsPoints,
       avgHeartRate: rideData.avgHeartRate,
       maxHeartRate: rideData.maxHeartRate,
       avgCadence: rideData.avgCadence,
@@ -651,9 +534,9 @@ class CycleScreenController {
       power10sAvg: rideData.power10sAvg,
       power20sAvg: rideData.power20sAvg,
       ftpZone: rideData.ftpZone,
-      altitude: currentAltitude,
-      altitudeGain: totalAltitudeGain,
-      maxAltitude: maxAltitude,
+      altitude: dataProcessor.currentAltitude,
+      altitudeGain: dataProcessor.totalAltitudeGain,
+      maxAltitude: dataProcessor.maxAltitude,
     );
 
     await storageService.saveSession(session);
@@ -661,16 +544,14 @@ class CycleScreenController {
 
   List<Map<String, double>> _enrichGpsPoints(List<Map<String, double>> originalPoints) {
     if (originalPoints.length > 10) {
-      return originalPoints; // We have enough points
+      return originalPoints;
     }
 
-    // If we have very few points, create interpolated points for Strava
     final enrichedPoints = <Map<String, double>>[];
     final duration = rideData.rideDuration.inSeconds;
 
     if (duration > 0 && originalPoints.isNotEmpty) {
-      // Create points at regular intervals
-      final pointsCount = duration ~/ 5; // One point every 5 seconds
+      final pointsCount = duration ~/ 5;
       final firstPoint = originalPoints.first;
 
       for (int i = 0; i < pointsCount; i++) {
@@ -683,7 +564,6 @@ class CycleScreenController {
         });
       }
     } else {
-      // Fallback: ensure at least 10 points
       for (int i = 0; i < 10; i++) {
         enrichedPoints.add({
           'lat': 0.0,
@@ -701,7 +581,6 @@ class CycleScreenController {
     final positions = rideService.gpsPositions;
 
     if (positions.isEmpty) {
-      // If no GPS data, create minimal data points for Strava
       return [
         {
           'lat': 0.0,
@@ -712,10 +591,9 @@ class CycleScreenController {
       ];
     }
 
-    // Convert positions to the format expected by GPX storage
     return positions.map((position) {
       final timeOffset = position.timestamp != null
-          ? position.timestamp!.difference(rideStartTime!).inSeconds.toDouble()
+          ? position.timestamp!.difference(timerManager.rideStartTime!).inSeconds.toDouble()
           : 0.0;
 
       return {
@@ -728,8 +606,7 @@ class CycleScreenController {
   }
 
   void dispose() {
-    rideTimer?.cancel();
-    lapTimer?.cancel();
+    timerManager.dispose();
     rideService.dispose();
   }
 }

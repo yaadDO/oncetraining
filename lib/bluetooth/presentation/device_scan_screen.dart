@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter/services.dart';
 import '../services/bluetooth_service.dart';
+import '../../core/domain/sensor_type.dart'; // ADD THIS IMPORT
 import '../../cycle/presentation/pages/cycle_screen.dart';
 
 class DeviceScanScreen extends StatefulWidget {

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../bluetooth/presentation/device_scan_screen.dart';
 import '../../bluetooth/services/bluetooth_service.dart';
+import '../../core/domain/sensor_type.dart';
 import '../../cycle/presentation/pages/cycle_screen.dart';
 import '../../history/presentation/history_screen.dart';
 import '../../planner/domain/ride_plan.dart';

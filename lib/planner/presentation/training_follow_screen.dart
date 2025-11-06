@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import '../../core/domain/sensor_type.dart';
 import '../domain/ride_plan.dart';
 import '../../bluetooth/services/bluetooth_service.dart';
 import '../../cycle/domain/ride_data.dart';

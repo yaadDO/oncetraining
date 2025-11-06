@@ -2,16 +2,20 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:oncetraining/bluetooth/services/bluetooth_service.dart' show PowerMeterService;
 import '../../../bluetooth/presentation/device_scan_screen.dart';
-import '../../../bluetooth/services/bluetooth_service.dart';
+import '../../../core/domain/sensor_type.dart';
 import '../../../core/services/gpx_storage_service.dart';
 import '../../../core/services/preferences_service.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../core/utils/permissions.dart';
 import '../../services/ride_service.dart';
+import '../../services/sensor_listener_service.dart';
 import '../components/metrics_grid.dart';
 import '../components/ride_controls.dart';
 import '../widgets/metric_editor.dart';
+import '../widgets/sensor_status_widget.dart';
 import 'cycle_screen_controller.dart';
 
 class PowerDisplayScreen extends StatefulWidget {
@@ -29,21 +33,7 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
   final GpxStorageService _storage = GpxStorageService();
   final RideService _rideService = RideService();
   late PowerMeterService _powerService;
-
-  // Sensor connection status
-  Map<SensorType, String> connectionStatus = {
-    SensorType.powerMeter: "Not connected",
-    SensorType.heartRate: "Not connected",
-    SensorType.cadence: "Not connected",
-    SensorType.speed: "Not connected",
-  };
-
-  Map<SensorType, bool> connectionErrors = {
-    SensorType.powerMeter: false,
-    SensorType.heartRate: false,
-    SensorType.cadence: false,
-    SensorType.speed: false,
-  };
+  late SensorListenerService _sensorListener;
 
   @override
   void initState() {
@@ -54,121 +44,54 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
       storageService: _storage,
       preferencesService: _prefsService,
     );
+
+    _setupSensorListeners();
     _initPowerService();
     _initializeController();
     _requestLocationPermission();
-    _setupSensorListeners();
   }
 
   Future<void> _initPowerService() async {
     if (widget.device != null) {
-      // For initial device connection
       await _connectSensor(SensorType.powerMeter, widget.device!);
     }
   }
 
-  String _getConnectionStatusText(SensorType type) {
-    if (type == SensorType.cadence &&
-        connectionStatus[SensorType.powerMeter]!.contains("Connected") &&
-        _powerService.cadenceFromPowerMeter) {
-      return "cadence: Connected (Power Meter)";
-    }
-    return "${type.toString().split('.').last}: ${connectionStatus[type]}";
-  }
-
   void _setupSensorListeners() {
-    // Power stream listener
-    _powerService.powerStream.listen((power) {
-      if (mounted) {
-        setState(() {
-          controller.rideData.currentPower = power;
-          connectionStatus[SensorType.powerMeter] = "Connected";
-          connectionErrors[SensorType.powerMeter] = false;
+    _sensorListener = SensorListenerService(
+      onPowerUpdate: (power) {
+        if (mounted) {
+          setState(() => controller.updatePowerData(power));
+        }
+      },
+      onHeartRateUpdate: (hr) {
+        if (mounted) {
+          setState(() => controller.updateHrMetrics(hr));
+        }
+      },
+      onCadenceUpdate: (cadence) {
+        if (mounted) {
+          setState(() => controller.updateCadenceMetrics(cadence));
+        }
+      },
+      onSpeedUpdate: (speed) {
+        if (mounted) {
+          setState(() => controller.updateSensorSpeed(speed));
+        }
+      },
+      onConnectionUpdate: (type, status, error) {
+        if (mounted) {
+          setState(() {
+            controller.sensorManager.updateConnectionStatus(type as SensorType, status, error: error);
+          });
+        }
+      },
+    );
 
-          controller.updateMetric('power', '${controller.rideData.currentPower}');
-          controller.updateWattsPerKilo();
-
-          if (controller.rideData.isRiding) {
-            controller.powerSamples.add(power);
-            if (power > controller.rideData.maxPower) {
-              controller.rideData.maxPower = power;
-            }
-            controller.updateMetric(
-              'max_power',
-              '${controller.rideData.maxPower}',
-            );
-            controller.updateAveragePower();
-            controller.updateKiloJoules();
-            controller.updateCalories();
-            controller.update3sPowerAvg(power);
-
-            // Add to lap samples if lap is active
-            if (controller.lapTimer != null) {
-              controller.lapPowerSamples.add(power);
-              if (power > controller.rideData.lapMaxPower) {
-                controller.rideData.lapMaxPower = power;
-              }
-              controller.updateMetric(
-                'lap_max_power',
-                '${controller.rideData.lapMaxPower}',
-              );
-            }
-          }
-        });
-      }
-    }, onError: (error) {
-      print('Power stream error: $error');
-    });
-
-    // Heart rate stream listener
-    _powerService.heartRateStream.listen((hr) {
-      if (mounted) {
-        setState(() {
-          controller.updateHrMetrics(hr);
-          connectionStatus[SensorType.heartRate] = "Connected";
-          connectionErrors[SensorType.heartRate] = false;
-
-          // Add to lap samples if lap is active
-          if (controller.lapTimer != null && controller.rideData.isRiding) {
-            controller.lapHeartRateSamples.add(hr);
-          }
-        });
-      }
-    }, onError: (error) {
-      print('Heart rate stream error: $error');
-    });
-
-    // Cadence stream listener
-    _powerService.cadenceStream.listen((cadence) {
-      if (mounted) {
-        setState(() {
-          controller.updateCadenceMetrics(cadence);
-          connectionStatus[SensorType.cadence] = "Connected";
-          connectionErrors[SensorType.cadence] = false;
-
-          // Add to lap samples if lap is active
-          if (controller.lapTimer != null && controller.rideData.isRiding) {
-            controller.lapCadenceSamples.add(cadence);
-          }
-        });
-      }
-    }, onError: (error) {
-      print('Cadence stream error: $error');
-    });
-
-    // Speed stream listener
-    _powerService.speedStream.listen((speedKmh) {
-      if (mounted) {
-        setState(() {
-          // Now we receive calculated speed directly
-          controller.updateSensorSpeed(speedKmh);
-          connectionStatus[SensorType.speed] = "Connected";
-          connectionErrors[SensorType.speed] = false;
-        });
-      }
-    }, onError: (error) {
-      print('Speed stream error: $error');
-    });
+    _sensorListener.setupPowerListener(_powerService.powerStream);
+    _sensorListener.setupHeartRateListener(_powerService.heartRateStream);
+    _sensorListener.setupCadenceListener(_powerService.cadenceStream);
+    _sensorListener.setupSpeedListener(_powerService.speedStream);
   }
 
   Future<void> _initializeController() async {
@@ -184,197 +107,162 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
 
   @override
   void dispose() {
-    controller.rideTimer?.cancel();
-    controller.lapTimer?.cancel();
-
-    // Stop GPS recording
+    controller.timerManager.dispose();
     _rideService.dispose();
-
-    // Disconnect Bluetooth
     _powerService.disconnectAll();
     _powerService.dispose();
-
     controller.dispose();
     super.dispose();
   }
 
-  Future<void> _connectSensor(
-      SensorType sensorType,
-      BluetoothDevice device,
-      ) async {
+  Future<void> _connectSensor(SensorType sensorType, BluetoothDevice device) async {
     setState(() {
-      connectionStatus[sensorType] = "Connecting...";
-      connectionErrors[sensorType] = false;
+      controller.sensorManager.updateConnectionStatus(sensorType, "Connecting...", error: false);
     });
 
     try {
       await _powerService.connect(sensorType, device);
-
-      // Force UI update after connection
       setState(() {
-        connectionStatus[sensorType] = "Connected";
-        connectionErrors[sensorType] = false;
+        controller.sensorManager.updateConnectionStatus(sensorType, "Connected", error: false);
       });
-
       print('Successfully connected to ${device.name} for $sensorType');
-
     } catch (e) {
       print('Error connecting to device: $e');
       setState(() {
-        connectionStatus[sensorType] = "Error: ${e.toString()}";
-        connectionErrors[sensorType] = true;
+        controller.sensorManager.updateConnectionStatus(sensorType, "Error: ${e.toString()}", error: true);
       });
     }
   }
 
-
   void _startRide() {
     setState(() {
       controller.startRide();
-
-      if (controller.isLocationPermissionGranted) {
-        _rideService.startGpsRecording((position) {
-          setState(() {
-            // Update distance and speed
-            controller.rideData.distance = _rideService.distance;
-            controller.updateMetric(
-              'distance',
-              controller.rideData.distance.toStringAsFixed(2),
-            );
-
-            controller.rideData.currentSpeed = _rideService.currentSpeed;
-            controller.updateMetric(
-              'speed',
-              controller.rideData.currentSpeed.toStringAsFixed(1),
-            );
-
-            // Update max speed
-            if (controller.rideData.currentSpeed > controller.rideData.maxSpeed) {
-              controller.rideData.maxSpeed = controller.rideData.currentSpeed;
-              controller.updateMetric(
-                'max_speed',
-                controller.rideData.maxSpeed.toStringAsFixed(1),
-              );
-            }
-
-            // Update lap max speed if lap is active
-            if (controller.lapTimer != null) {
-              controller.updateLapMaxSpeed(controller.rideData.currentSpeed);
-            }
-
-            controller.updateAvgSpeed();
-
-            // Update altitude metrics
-            if (position.altitude > 0) {
-              controller.updateAltitudeMetrics(position.altitude);
-            }
-          });
-        });
-      } else {
-        // Request location permission if not granted
-        _requestLocationPermission();
-      }
-
-      // Start ride timer
-      controller.rideTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        setState(() {
-          controller.rideData.rideDuration += const Duration(seconds: 1);
-          controller.updateMetric(
-            'time',
-            formatDuration(controller.rideData.rideDuration),
-          );
-          controller.updateMetric('local_time', formatTime(DateTime.now()));
-          controller.updateMetric(
-            'ride_time',
-            formatDuration(controller.rideData.rideDuration),
-          );
-          controller.updateMetric(
-            'trip_time',
-            formatDuration(controller.rideData.rideDuration),
-          );
-        });
-      });
+      _startTimers();
+      _startGpsRecording();
     });
+  }
+
+  void _startTimers() {
+    controller.timerManager.startRideTimer((duration) {
+      if (mounted) {
+        setState(() {
+          controller.rideData.rideDuration = duration;
+          _updateTimeMetrics();
+        });
+      }
+    });
+  }
+
+  void _startGpsRecording() {
+    if (controller.isLocationPermissionGranted) {
+      _rideService.startGpsRecording((position) {
+        if (mounted) {
+          setState(() {
+            _updateGpsData(position);
+          });
+        }
+      });
+    } else {
+      _requestLocationPermission();
+    }
+  }
+
+  void _updateGpsData(Position position) {
+    controller.rideData.distance = _rideService.distance;
+    controller.updateMetric('distance', controller.rideData.distance.toStringAsFixed(2));
+
+    controller.rideData.currentSpeed = _rideService.currentSpeed;
+    controller.updateMetric('speed', controller.rideData.currentSpeed.toStringAsFixed(1));
+
+    if (controller.rideData.currentSpeed > controller.rideData.maxSpeed) {
+      controller.rideData.maxSpeed = controller.rideData.currentSpeed;
+      controller.updateMetric('max_speed', controller.rideData.maxSpeed.toStringAsFixed(1));
+    }
+
+    if (controller.rideState.isLapActive) {
+      controller.updateLapMaxSpeed(controller.rideData.currentSpeed);
+    }
+
+    controller.updateAvgSpeed();
+
+    if (position.altitude > 0) {
+      controller.updateAltitudeMetrics(position.altitude);
+    }
+  }
+
+  void _updateTimeMetrics() {
+    controller.updateMetric('time', formatDuration(controller.rideData.rideDuration));
+    controller.updateMetric('local_time', formatTime(DateTime.now()));
+    controller.updateMetric('ride_time', formatDuration(controller.rideData.rideDuration));
+    controller.updateMetric('trip_time', formatDuration(controller.rideData.rideDuration));
   }
 
   void _startLap() {
     setState(() {
       controller.startLap();
-
-      // Start lap timer
-      controller.lapTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (mounted) {
-          setState(() {
-            controller.rideData.lapDuration += const Duration(seconds: 1);
-            controller.updateMetric(
-              'lap_time',
-              formatDuration(controller.rideData.lapDuration),
-            );
-
-            // Update lap distance from GPS
-            if (controller.isLocationPermissionGranted) {
-              controller.rideData.lapDistance = _rideService.lapDistance;
-              controller.updateMetric(
-                'lap_distance',
-                controller.rideData.lapDistance.toStringAsFixed(2),
-              );
-            }
-
-            // Update lap averages
-            controller.updateLapAvgSpeed();
-
-            // Update lap power average
-            if (controller.lapPowerSamples.isNotEmpty) {
-              final total = controller.lapPowerSamples.reduce((a, b) => a + b);
-              controller.rideData.lapAvgPower = total ~/ controller.lapPowerSamples.length;
-              controller.updateMetric('lap_avg_power', '${controller.rideData.lapAvgPower}');
-            }
-
-            // Update lap heart rate average
-            if (controller.lapHeartRateSamples.isNotEmpty) {
-              final total = controller.lapHeartRateSamples.reduce((a, b) => a + b);
-              controller.rideData.lapAvgHeartRate = total ~/ controller.lapHeartRateSamples.length;
-              controller.updateMetric('lap_avg_hr', '${controller.rideData.lapAvgHeartRate}');
-            }
-
-            // Update lap cadence average
-            if (controller.lapCadenceSamples.isNotEmpty) {
-              final total = controller.lapCadenceSamples.reduce((a, b) => a + b);
-              controller.rideData.lapAvgCadence = total ~/ controller.lapCadenceSamples.length;
-              controller.updateMetric('lap_avg_cadence', '${controller.rideData.lapAvgCadence}');
-            }
-          });
-        }
-      });
+      _startLapTimer();
     });
+  }
+
+  void _startLapTimer() {
+    controller.timerManager.startLapTimer((duration) {
+      if (mounted) {
+        setState(() {
+          controller.rideData.lapDuration = duration;
+          _updateLapMetrics();
+        });
+      }
+    });
+  }
+
+  void _updateLapMetrics() {
+    controller.updateMetric('lap_time', formatDuration(controller.rideData.lapDuration));
+
+    if (controller.isLocationPermissionGranted) {
+      controller.rideData.lapDistance = _rideService.lapDistance;
+      controller.updateMetric('lap_distance', controller.rideData.lapDistance.toStringAsFixed(2));
+    }
+
+    controller.updateLapAvgSpeed();
+
+    if (controller.dataProcessor.lapPowerSamples.isNotEmpty) {
+      final total = controller.dataProcessor.lapPowerSamples.reduce((a, b) => a + b);
+      controller.rideData.lapAvgPower = total ~/ controller.dataProcessor.lapPowerSamples.length;
+      controller.updateMetric('lap_avg_power', '${controller.rideData.lapAvgPower}');
+    }
+
+    if (controller.dataProcessor.lapHeartRateSamples.isNotEmpty) {
+      final total = controller.dataProcessor.lapHeartRateSamples.reduce((a, b) => a + b);
+      controller.rideData.lapAvgHeartRate = total ~/ controller.dataProcessor.lapHeartRateSamples.length;
+      controller.updateMetric('lap_avg_hr', '${controller.rideData.lapAvgHeartRate}');
+    }
+
+    if (controller.dataProcessor.lapCadenceSamples.isNotEmpty) {
+      final total = controller.dataProcessor.lapCadenceSamples.reduce((a, b) => a + b);
+      controller.rideData.lapAvgCadence = total ~/ controller.dataProcessor.lapCadenceSamples.length;
+      controller.updateMetric('lap_avg_cadence', '${controller.rideData.lapAvgCadence}');
+    }
   }
 
   void _toggleLap() {
     setState(() {
-      if (controller.lapTimer == null) {
-        // Start a new lap
+      if (!controller.rideState.isLapActive) {
         _startLap();
       } else {
-        // Stop the current lap
         controller.stopLap();
-        controller.lapTimer?.cancel();
-        controller.lapTimer = null;
-
-        // Reset lap duration for next lap
+        controller.timerManager.stopLapTimer();
         controller.rideData.lapDuration = Duration.zero;
-        controller.updateMetric(
-          'lap_time',
-          formatDuration(controller.rideData.lapDuration),
-        );
+        controller.updateMetric('lap_time', formatDuration(controller.rideData.lapDuration));
       }
     });
   }
 
   void _stopRide() {
     setState(() {
+      controller.rideState.stopRide();
       controller.rideData.isRiding = false;
-      controller.rideTimer?.cancel();
-      controller.lapTimer?.cancel();
+      controller.timerManager.stopRideTimer();
+      controller.timerManager.stopLapTimer();
       controller.updateAveragePower();
       _rideService.dispose();
       _saveRideSession();
@@ -382,15 +270,13 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
   }
 
   Future<bool> _onWillPop() async {
-    // If no ride is in progress or no data to save, allow immediate exit
     if (!controller.rideData.isRiding && controller.rideData.rideDuration.inSeconds == 0) {
       return true;
     }
 
-    // Show confirmation dialog for unsaved ride
     final shouldSave = await showDialog<bool?>(
       context: context,
-      barrierDismissible: true, // Allow tapping outside to dismiss
+      barrierDismissible: true,
       builder: (context) => AlertDialog(
         backgroundColor: Colors.blue.shade800,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -408,7 +294,7 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
               'CANCEL',
               style: TextStyle(color: Colors.white70),
             ),
-            onPressed: () => Navigator.of(context).pop(null), // Returns null for cancel
+            onPressed: () => Navigator.of(context).pop(null),
           ),
           TextButton(
             child: Text(
@@ -428,16 +314,12 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
       ),
     );
 
-    // Handle the dialog result
     if (shouldSave == null) {
-      // User tapped outside or pressed CANCEL - stay on screen
       return false;
     } else if (shouldSave == true) {
-      // User chose SAVE - save and exit
       await _saveRideAndExit();
       return true;
     } else {
-      // User chose DISCARD - show confirmation warning
       final confirmDiscard = await showDialog<bool>(
         context: context,
         barrierDismissible: true,
@@ -471,32 +353,21 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
         ),
       );
 
-      // Handle discard confirmation
-      if (confirmDiscard == true) {
-        // User confirmed discard - exit without saving
-        return true;
-      } else {
-        // User canceled discard - stay on screen
-        return false;
-      }
+      return confirmDiscard == true;
     }
   }
 
   Future<void> _saveRideAndExit() async {
-    // Stop any active timers
-    controller.rideTimer?.cancel();
-    controller.lapTimer?.cancel();
+    controller.timerManager.stopRideTimer();
+    controller.timerManager.stopLapTimer();
 
-    // Update final calculations
     controller.updateAveragePower();
     controller.updateAverageHeartRate();
     controller.updateAverageCadence();
     controller.updateNormalisedPower();
 
-    // Save the ride session
     await controller.saveRideSession(widget.device);
 
-    // Show confirmation
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('Ride saved successfully'),
@@ -532,7 +403,6 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
             allMetrics: controller.allMetrics,
             displayedMetrics: controller.displayedMetrics,
             onSave: (selectedMetrics) async {
-              // FIX: Update state first THEN save
               setState(() {
                 controller.displayedMetrics = selectedMetrics;
               });
@@ -556,7 +426,6 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
       await _connectSensor(sensorType, device);
     }
   }
-
 
   void _showSensorSelection() {
     showModalBottomSheet(
@@ -625,50 +494,8 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
       ),
       onPressed: () {
         Navigator.pop(context);
-        _handleDeviceSelection(
-            type); // Use the new method instead of direct navigation
+        _handleDeviceSelection(type);
       },
-    );
-  }
-
-  Widget _buildSensorIcon(SensorType type, IconData icon) {
-    String status = connectionStatus[type]!;
-    bool hasError = connectionErrors[type]!;
-
-    // Special handling for cadence when power meter is connected
-    bool isConnected = false;
-
-    if (type == SensorType.cadence) {
-      // Cadence is connected if:
-      // 1. Direct cadence sensor is connected, OR
-      // 2. Power meter is connected and provides cadence
-      isConnected = status.contains("Connected") ||
-          (connectionStatus[SensorType.powerMeter]!.contains("Connected") &&
-              _powerService.cadenceFromPowerMeter);
-    } else {
-      isConnected = status.contains("Connected");
-    }
-
-    Color iconColor;
-    if (hasError) {
-      iconColor = Colors.red;
-    } else if (isConnected) {
-      iconColor = Colors.green;
-    } else {
-      iconColor = Colors.yellow;
-    }
-
-    String tooltip = "${type.toString().split('.').last}: $status";
-    if (type == SensorType.cadence && _powerService.cadenceFromPowerMeter) {
-      tooltip = "cadence: Connected (Power Meter)";
-    }
-
-    return Tooltip(
-      message: tooltip,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4.0),
-        child: Icon(icon, color: iconColor, size: 24),
-      ),
     );
   }
 
@@ -714,92 +541,29 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
             ),
             child: Column(
               children: [
-                // Custom App Bar
-                Container(
-                  padding: EdgeInsets.only(
-                    top: 50,
-                    left: 20,
-                    right: 20,
-                    bottom: 15,
-                  ),
-                  child: Row(
-                    children: [
-                      IconButton(
-                        icon: Icon(Icons.arrow_back, color: Colors.white, size: 28),
-                        onPressed: () async {
-                          final shouldExit = await _onWillPop();
-                          if (shouldExit && mounted) {
-                            Navigator.pop(context);
-                          }
-                        },
-                      ),
-                      Spacer(),
-                      // Sensor status icons
-                      _buildSensorIcon(SensorType.powerMeter, Icons.flash_on),
-                      _buildSensorIcon(SensorType.heartRate, Icons.favorite),
-                      _buildSensorIcon(SensorType.cadence, Icons.repeat),
-                      _buildSensorIcon(SensorType.speed, Icons.speed),
-                      SizedBox(width: 10),
-                      IconButton(
-                        icon: Icon(Icons.grid_on, color: Colors.white, size: 28),
-                        onPressed: _openMetricEditor,
-                      ),
-                      SizedBox(width: 10),
-                      IconButton(
-                        icon: Icon(
-                          Icons.bluetooth,
-                          color: Colors.white,
-                          size: 28,
-                        ),
-                        onPressed: _showSensorSelection,
-                      ),
-                    ],
-                  ),
+                SensorAppBar(
+                  controller: controller,
+                  powerService: _powerService,
+                  onBackPressed: () async {
+                    final shouldExit = await _onWillPop();
+                    if (shouldExit && mounted) Navigator.pop(context);
+                  },
+                  onMetricEditorPressed: _openMetricEditor,
+                  onSensorSelectionPressed: _showSensorSelection,
                 ),
 
-                // Connection Status Summary
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: Wrap(
-                    alignment: WrapAlignment.center,
-                    spacing: 10,
-                    children: [
-                      for (var type in SensorType.values)
-                        if (connectionErrors[type]! ||
-                            connectionStatus[type]!.contains("Error") ||
-                            connectionStatus[type]!.contains("Connected") ||
-                            (type == SensorType.cadence &&
-                                connectionStatus[SensorType.powerMeter]!.contains("Connected") &&
-                                _powerService.cadenceFromPowerMeter))
-                          Chip(
-                            label: Text(
-                              _getConnectionStatusText(type),
-                              style: TextStyle(
-                                color: connectionErrors[type]!
-                                    ? Colors.red[300]
-                                    : Colors.green[300],
-                                fontSize: 14,
-                              ),
-                            ),
-                            backgroundColor: Colors.black.withOpacity(0.2),
-                          ),
-                    ],
-                  ),
-                ),
+                SensorConnectionStatus(controller: controller, powerService: _powerService),
 
-
-
-                // Main Content
                 Expanded(
                   child: Column(
                     children: [
                       MetricsGrid(displayedMetrics: controller.displayedMetrics),
                       RideControls(
-                        isRiding: controller.rideData.isRiding,
-                        isLapActive: controller.lapTimer != null,
+                        isRiding: controller.rideState.isRiding,
+                        isLapActive: controller.rideState.isLapActive,
                         onStartRide: _startRide,
                         onStopRide: _stopRide,
-                        onLapPressed: _toggleLap, // Changed from onStartLap/onStopLap
+                        onLapPressed: _toggleLap,
                       ),
                     ],
                   ),
@@ -812,5 +576,3 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
     );
   }
 }
-
-

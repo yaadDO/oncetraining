@@ -1,8 +1,6 @@
-// [file name]: gpx_storage_service.dart
 import 'dart:io';
 import 'package:gpx/gpx.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:intl/intl.dart';
 import '../../cycle/domain/ride_session.dart';
 

@@ -3,14 +3,15 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/utils/permissions.dart';
+import '../../core/domain/sensor_type.dart'; // ADD THIS IMPORT
 
-// Add sensor type enum
-enum SensorType {
-  powerMeter,
-  heartRate,
-  cadence,
-  speed,
-}
+// REMOVE THIS DUPLICATE ENUM:
+// enum SensorType {
+//   powerMeter,
+//   heartRate,
+//   cadence,
+//   speed,
+// }
 
 class PowerMeterService {
   static final Guid CYCLING_POWER_SERVICE = Guid("00001818-0000-1000-8000-00805f9b34fb");
@@ -328,9 +329,12 @@ class PowerMeterService {
                 _characteristics[sensorType] = characteristic;
                 await characteristic.setNotifyValue(true);
                 characteristic.value.listen(_parsePowerData);
-                _connectionStatus[sensorType] = "Connected";
 
-                // Force cadence to show as connected from power meter
+                // Update connection status for power meter
+                _connectionStatus[sensorType] = "Connected";
+                _connectionErrors[sensorType] = false;
+
+                // IMPORTANT: Force cadence to show as connected from power meter
                 _cadenceFromPowerMeter = true;
                 _connectionStatus[SensorType.cadence] = "Connected (Power Meter)";
                 _connectionErrors[SensorType.cadence] = false;
@@ -343,6 +347,9 @@ class PowerMeterService {
                 characteristicFound = true;
                 print('✅ Power meter connected and cadence setup complete');
                 print('🔧 Cadence will be calculated from power meter data');
+
+                // Force a status update to the UI
+                _cadenceController.add(0); // Add initial value to trigger stream
               }
               break;
             case SensorType.heartRate:
@@ -415,128 +422,159 @@ class PowerMeterService {
       try {
         // Parse flags (first 2 bytes, little-endian)
         int flags = (value[1] << 8) | value[0];
-        print('Flags: ${flags.toRadixString(2).padLeft(16, '0')} (binary)');
+        print('Flags: 0x${flags.toRadixString(16).padLeft(4, '0')}');
+        print('Flags binary: ${flags.toRadixString(2).padLeft(16, '0')}');
 
-        // Check important flag bits
-        bool hasCrankData = (flags & 0x20) != 0;
-        print('Has crank data (bit 5): $hasCrankData');
+        // Check ALL flag bits to understand what data is present
+        bool hasWheelData = (flags & 0x01) != 0;      // Bit 0
+        bool hasCrankData = (flags & 0x02) != 0;      // Bit 1 - THIS IS THE IMPORTANT ONE
+        bool hasExtremeForce = (flags & 0x04) != 0;   // Bit 2
+        bool hasExtremeTorque = (flags & 0x08) != 0;  // Bit 3
+        bool hasExtremeAngle = (flags & 0x10) != 0;   // Bit 4
+        bool hasTopDeadSpot = (flags & 0x20) != 0;    // Bit 5
+        bool hasBottomDeadSpot = (flags & 0x40) != 0; // Bit 6
+        bool hasAccumulatedEnergy = (flags & 0x80) != 0; // Bit 7
+        bool hasOffset = (flags & 0x100) != 0;        // Bit 8
+
+        print('Flag breakdown:');
+        print('  Wheel Data: $hasWheelData');
+        print('  Crank Data: $hasCrankData (THIS SHOULD BE TRUE FOR CADENCE)');
+        print('  Extreme Force: $hasExtremeForce');
+        print('  Extreme Torque: $hasExtremeTorque');
+        print('  Extreme Angle: $hasExtremeAngle');
+        print('  Top Dead Spot: $hasTopDeadSpot');
+        print('  Bottom Dead Spot: $hasBottomDeadSpot');
+        print('  Accumulated Energy: $hasAccumulatedEnergy');
+        print('  Offset: $hasOffset');
 
         // Parse power (bytes 2-3, little-endian, signed)
         int power = (value[3] << 8) | value[2];
-        // Handle signed power values (two's complement)
-        if (power > 32767) {
-          power = power - 65536;
-        }
+        if (power > 32767) power = power - 65536;
 
         if (power >= 0 && power < 65535) {
           print('Power: $power watts');
           _powerController.add(power);
         }
 
-        // Check for cadence data based on flags
-        if (hasCrankData && value.length >= 9) {
-          print('=== CRANK DATA FOUND ===');
+        int currentOffset = 4; // Start after flags and power
 
-          // Crank data starts at byte 4 (after flags and power)
-          // Cumulative Crank Revolutions (UINT32) - bytes 4-7
-          int cumulativeCrankRevolutions = (value[7] << 24) |
-          (value[6] << 16) |
-          (value[5] << 8) |
-          value[4];
+        // Try multiple parsing strategies for 4iiii power meter
+        bool cadenceParsed = false;
 
-          // Last Crank Event Time (UINT16) - bytes 8-9
-          int lastCrankEventTime = (value[9] << 8) | value[8];
+        // Strategy 1: Standard parsing with flags
+        if (hasCrankData && value.length >= currentOffset + 6) {
+          print('=== PARSING CRANK DATA (Standard) ===');
+          int cumulativeCrankRevolutions = (value[currentOffset + 3] << 24) |
+          (value[currentOffset + 2] << 16) |
+          (value[currentOffset + 1] << 8) |
+          value[currentOffset];
 
-          print('Cumulative Crank Revolutions: $cumulativeCrankRevolutions');
-          print('Last Crank Event Time: $lastCrankEventTime');
+          int lastCrankEventTime = (value[currentOffset + 5] << 8) | value[currentOffset + 4];
 
-          // Calculate cadence from crank data
-          int cadence = _calculateCadenceFromPowerMeter(
-              cumulativeCrankRevolutions,
-              lastCrankEventTime
-          );
-
+          int cadence = _calculateCadenceFromPowerMeter(cumulativeCrankRevolutions, lastCrankEventTime);
           if (cadence > 0 && cadence < 255) {
-            print('🎯 Calculated cadence: $cadence RPM');
+            print('🎯 Cadence from standard parsing: $cadence RPM');
             _cadenceController.add(cadence);
-          } else {
-            print('⚠️  Cadence out of range: $cadence RPM');
+            cadenceParsed = true;
           }
-        } else {
-          print('❌ No crank data or insufficient bytes');
-          if (!hasCrankData) {
-            print('Crank data flag (bit 5) is not set in flags');
-          }
-          if (value.length < 9) {
-            print('Insufficient data length: ${value.length} bytes, need at least 9');
+          currentOffset += 6;
+        }
+
+        // Strategy 2: Try fixed position for 4iiii (common pattern)
+        if (!cadenceParsed && value.length >= 10) {
+          print('=== PARSING CRANK DATA (4iiii Fixed Position) ===');
+          try {
+            int cumulativeCrankRevolutions = (value[7] << 24) | (value[6] << 16) | (value[5] << 8) | value[4];
+            int lastCrankEventTime = (value[9] << 8) | value[8];
+
+            int cadence = _calculateCadenceFromPowerMeter(cumulativeCrankRevolutions, lastCrankEventTime);
+            if (cadence > 0 && cadence < 255) {
+              print('🎯 Cadence from 4iiii fixed parsing: $cadence RPM');
+              _cadenceController.add(cadence);
+              cadenceParsed = true;
+            }
+          } catch (e) {
+            print('4iiii fixed parsing failed: $e');
           }
         }
+
+        // Strategy 3: Try alternative positions
+        if (!cadenceParsed && value.length >= 8) {
+          print('=== PARSING CRANK DATA (Alternative) ===');
+          // Try different byte combinations
+          for (int offset = 4; offset <= value.length - 4; offset++) {
+            try {
+              int potentialRevs = (value[offset + 3] << 24) | (value[offset + 2] << 16) |
+              (value[offset + 1] << 8) | value[offset];
+              int potentialTime = (value[offset + 5] << 8) | value[offset + 4];
+
+              if (potentialRevs < 1000000 && potentialTime < 65536) { // Reasonable bounds
+                int cadence = _calculateCadenceFromPowerMeter(potentialRevs, potentialTime);
+                if (cadence > 10 && cadence < 250) {
+                  print('🎯 Cadence from alternative parsing at offset $offset: $cadence RPM');
+                  _cadenceController.add(cadence);
+                  cadenceParsed = true;
+                  break;
+                }
+              }
+            } catch (e) {
+              // Continue trying other offsets
+            }
+          }
+        }
+
+        if (!cadenceParsed) {
+          print('❌ No cadence data could be parsed from this packet');
+          print('Available bytes after power: ${value.length - 4}');
+        }
+
       } catch (e) {
         print('❌ Error parsing power data: $e');
-        print('Stack trace: ${e.toString()}');
       }
     } else {
-      print('❌ Power data too short: ${value.length} bytes, need at least 4');
+      print('❌ Power data too short: ${value.length} bytes');
     }
     print('=== END POWER METER DATA ===\n');
   }
 
   int _calculateCadenceFromPowerMeter(int cumulativeRevs, int eventTime) {
-    print('🔧 Calculating cadence from:');
-    print('   Current revs: $cumulativeRevs, Current time: $eventTime');
-    print('   Previous revs: $_lastCumulativeRevs, Previous time: $_lastEventTime');
-
-    // Only calculate if we have previous data and it's not the first reading
-    if (_lastCumulativeRevs > 0 && _lastEventTime > 0) {
-      try {
-        int revsDifference = cumulativeRevs - _lastCumulativeRevs;
-        int timeDifference = eventTime - _lastEventTime;
-
-        print('   Revs difference: $revsDifference');
-        print('   Time difference: $timeDifference');
-
-        // Handle time rollover (eventTime is 16-bit, rolls over every 64 seconds)
-        if (timeDifference < 0) {
-          timeDifference += 65536; // 2^16
-          print('   Time rollover handled, new time difference: $timeDifference');
-        }
-
-        // Convert time from 1/1024 seconds to minutes
-        double timeInMinutes = timeDifference / (1024.0 * 60.0);
-        print('   Time in minutes: ${timeInMinutes.toStringAsFixed(6)}');
-
-        if (timeInMinutes > 0 && revsDifference >= 0) {
-          // Cadence = revolutions per minute
-          int cadence = (revsDifference / timeInMinutes).round();
-          print('   Raw cadence calculation: $revsDifference revs / ${timeInMinutes.toStringAsFixed(6)} min = $cadence RPM');
-
-          // Filter out unrealistic cadence values (0-250 RPM range)
-          if (cadence > 0 && cadence <= 250) {
-            _lastCadence = cadence;
-            print('   ✅ Valid cadence: $cadence RPM');
-            return cadence;
-          } else {
-            print('   ⚠️  Cadence out of valid range (0-250): $cadence RPM, using last valid: $_lastCadence');
-            return _lastCadence;
-          }
-        } else {
-          print('   ⚠️  Invalid time or revs difference, using last valid cadence: $_lastCadence');
-        }
-      } catch (e) {
-        print('   ❌ Error calculating cadence: $e');
-      }
-    } else {
-      print('   ⏳ First reading or missing previous data, storing values for next calculation');
+    // Store previous values if this is the first call
+    if (_lastCumulativeRevs == 0 && _lastEventTime == 0) {
+      _lastCumulativeRevs = cumulativeRevs;
+      _lastEventTime = eventTime;
+      return 0;
     }
 
-    // Update previous values for next calculation
+    // Only calculate if we have movement
+    if (cumulativeRevs != _lastCumulativeRevs) {
+      int revsDifference = cumulativeRevs - _lastCumulativeRevs;
+      int timeDifference = eventTime - _lastEventTime;
+
+      // Handle time rollover
+      if (timeDifference < 0) {
+        timeDifference += 65536;
+      }
+
+      // Calculate cadence if we have a reasonable time difference
+      if (timeDifference > 0 && revsDifference > 0) {
+        double timeInMinutes = timeDifference / (1024.0 * 60.0);
+        int cadence = (revsDifference / timeInMinutes).round();
+
+        // Valid cadence range
+        if (cadence >= 10 && cadence <= 250) {
+          _lastCadence = cadence;
+          print('✅ Calculated cadence: $cadence RPM (${revsDifference} revs in ${timeDifference}/1024s)');
+          return cadence;
+        }
+      }
+    }
+
+    // Update for next calculation
     _lastCumulativeRevs = cumulativeRevs;
     _lastEventTime = eventTime;
 
-    print('   📍 Returning last valid cadence: $_lastCadence');
-    return _lastCadence;
+    return _lastCadence; // Return last valid cadence
   }
-
   void _parseHeartRateData(List<int> value) {
     if (value.isNotEmpty) {
       // First byte: Flags
