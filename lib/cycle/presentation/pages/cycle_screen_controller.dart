@@ -30,6 +30,8 @@ class CycleScreenController {
   bool isLocationPermissionGranted = false;
   List<MetricBlock> displayedMetrics = [];
   List<MetricBlock> allMetrics = [];
+  final List<int> _cadence3sBuffer = [];
+  final List<int> _cadence10sBuffer = [];
 
   // User settings (loaded from preferences)
   double userWeight = 70.0; // kg

@@ -167,6 +167,9 @@ class MetricBlock {
       case 'lap_time': return 'Lap Time';
       case 'lap_count': return 'Lap Count';
 
+    case 'cadence_3s_avg': return '3s Avg Cadence';
+    case 'cadence_10s_avg': return '10s Avg Cadence';
+
 
       default: return key;
     }
@@ -190,6 +193,9 @@ class MetricBlock {
       case 'avg_cadence': return 'rpm';
       case 'avg_hr': return 'bpm';
       case 'avg_speed': return 'km/h';
+
+      case 'cadence_3s_avg': return 'rpm';
+      case 'cadence_10s_avg': return 'rpm';
 
     // Speed category
       case 'lap_max_speed': return 'km/h';

@@ -60,6 +60,9 @@ class PowerMeterService {
   bool _cadenceFromPowerMeter = false;
   bool get cadenceFromPowerMeter => _cadenceFromPowerMeter;
 
+  final List<int> _cadenceBuffer = [];
+  static const int _cadenceBufferSize = 6;
+
   // Add these for device scanning
   final _foundDevices = <BluetoothDevice>[];
   final _scanResultsController = StreamController<List<BluetoothDevice>>.broadcast();
@@ -436,6 +439,13 @@ class PowerMeterService {
           _powerController.add(power);
         }
 
+        if (power == 0) {
+          print('⚡ Power is 0, setting cadence to 0');
+          _cadenceBuffer.clear(); // Clear buffer when not pedaling
+          _cadenceController.add(0);
+          return;
+        }
+
         // SPECIAL 4IIII PARSING - Try to extract cadence even without the flag
         if (value.length >= 10) {
           print('=== ATTEMPTING 4IIII CADENCE EXTRACTION ===');
@@ -491,10 +501,14 @@ class PowerMeterService {
     // Alternative 1: Try interpreting as simple cadence value
     if (value.length >= 6) {
       // Sometimes cadence is just a single byte or two bytes
-      int potentialCadence = value[4]; // Try byte 4 as direct cadence value
-      if (potentialCadence > 0 && potentialCadence < 255) {
-        print('🎯 Alternative 1 - Direct cadence from byte 4: $potentialCadence RPM');
-        _cadenceController.add(potentialCadence);
+      int rawCadence = value[4]; // Try byte 4 as direct cadence value
+
+      if (rawCadence > 0 && rawCadence < 255) {
+        // Apply smoothing with moving average
+        int smoothedCadence = _calculateSmoothedCadence(rawCadence);
+
+        print('🎯 Raw cadence: $rawCadence RPM | Smoothed: $smoothedCadence RPM');
+        _cadenceController.add(smoothedCadence);
         return;
       }
     }
@@ -509,8 +523,9 @@ class PowerMeterService {
           if (revs < 100000 && time < 65536 && time > 0) {
             int cadence = _calculateCadenceFromPowerMeter(revs, time);
             if (cadence > 10 && cadence < 250) {
-              print('🎯 Alternative 2 - Cadence at offset $i: $cadence RPM');
-              _cadenceController.add(cadence);
+              int smoothedCadence = _calculateSmoothedCadence(cadence);
+              print('🎯 Alternative 2 - Raw cadence: $cadence RPM | Smoothed: $smoothedCadence RPM');
+              _cadenceController.add(smoothedCadence);
               return;
             }
           }
@@ -524,6 +539,46 @@ class PowerMeterService {
     _detectCadenceFromPowerPattern();
 
     print('❌ No cadence data found in alternative parsing');
+  }
+
+  int _calculateSmoothedCadence(int rawCadence) {
+    // Add new reading to buffer
+    _cadenceBuffer.add(rawCadence);
+
+    // Remove oldest reading if buffer is full
+    if (_cadenceBuffer.length > _cadenceBufferSize) {
+      _cadenceBuffer.removeAt(0);
+    }
+
+    // Calculate moving average
+    if (_cadenceBuffer.isEmpty) return rawCadence;
+
+    int sum = _cadenceBuffer.reduce((a, b) => a + b);
+    int average = sum ~/ _cadenceBuffer.length;
+
+    // Apply additional smoothing for more stable values
+    if (_lastCadence > 0) {
+      // Only allow gradual changes (max ±10 RPM change from previous smoothed value)
+      int maxChange = 10;
+      if (average.abs() - _lastCadence.abs() > maxChange) {
+        // If change is too drastic, move gradually toward the new value
+        if (average > _lastCadence) {
+          average = _lastCadence + maxChange;
+        } else {
+          average = _lastCadence - maxChange;
+        }
+      }
+
+      // Additional: filter out obviously wrong values (like 227 RPM when you're at 80)
+      if (rawCadence > 120 && _lastCadence < 100) {
+        // If we suddenly jump to very high cadence, it's probably wrong
+        average = _lastCadence; // Keep previous value
+        print('🛡️  Filtered out unlikely cadence jump: $rawCadence RPM');
+      }
+    }
+
+    print('📊 Cadence smoothing: ${_cadenceBuffer.length} samples, Raw: $rawCadence, Smoothed: $average');
+    return average;
   }
 
   void _detectCadenceFromPowerPattern() {
