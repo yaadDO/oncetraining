@@ -1,7 +1,9 @@
+// gpx_storage_service.dart
 import 'dart:io';
 import 'package:gpx/gpx.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:intl/intl.dart';
+import 'package:xml/xml.dart' as xml;
 import '../../cycle/domain/ride_session.dart';
 
 class GpxStorageService {
@@ -21,122 +23,187 @@ class GpxStorageService {
     final dir = await _getAppDirectory();
     final file = File('${dir.path}/${session.id}.gpx');
 
-    // Create GPX object
-    final gpx = Gpx();
-    gpx.creator = 'Power Meter App';
-    gpx.version = '1.1';
+    // Create enhanced GPX with power data
+    final gpxContent = _createEnhancedGpx(session);
+    await file.writeAsString(gpxContent);
+  }
 
-    // Add metadata with Strava-required fields
-    gpx.metadata = Metadata()
-      ..name = 'Cycling Activity - ${DateFormat('yyyy-MM-dd HH:mm').format(session.startTime)}'
-      ..time = session.startTime
-      ..desc = 'Power: ${session.avgPower}W avg, ${session.maxPower}W max | '
-          'Distance: ${session.distance.toStringAsFixed(2)}km | '
-          'Duration: ${_formatDuration(Duration(seconds: session.durationSeconds))}';
+  String _createEnhancedGpx(RideSession session) {
+    final builder = xml.XmlBuilder();
+    builder.processing('xml', 'version="1.0" encoding="UTF-8"');
 
-    // Add track with GPS points - REQUIRED BY STRAVA
-    if (session.gpsPoints.isNotEmpty) {
-      final track = Trk()
-        ..name = 'Cycling Activity'
-        ..type = '9'; // Strava activity type code for cycling
+    builder.element('gpx', nest: () {
+      builder.attribute('version', '1.1');
+      builder.attribute('creator', 'Power Meter App');
+      builder.attribute('xmlns:xsi', 'http://www.w3.org/2001/XMLSchema-instance');
+      builder.attribute('xmlns', 'http://www.topografix.com/GPX/1/1');
+      builder.attribute('xsi:schemaLocation',
+          'http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd');
+      builder.attribute('xmlns:gpxtpx', 'http://www.garmin.com/xmlschemas/TrackPointExtension/v1');
+      builder.attribute('xmlns:gpxx', 'http://www.garmin.com/xmlschemas/GpxExtensions/v3');
 
-      final segment = Trkseg();
+      // Metadata
+      builder.element('metadata', nest: () {
+        builder.element('name', nest: 'Cycling Activity - ${DateFormat('yyyy-MM-dd HH:mm').format(session.startTime)}');
+        builder.element('time', nest: session.startTime.toUtc().toIso8601String());
+        builder.element('desc', nest:
+        'Power: ${session.avgPower}W avg, ${session.maxPower}W max | '
+            'Distance: ${session.distance.toStringAsFixed(2)}km | '
+            'Duration: ${_formatDuration(Duration(seconds: session.durationSeconds))}');
+      });
 
-      for (final point in session.gpsPoints) {
-        final wpt = Wpt()
-          ..lat = point['lat'] ?? 0.0
-          ..lon = point['lon'] ?? 0.0
-          ..time = session.startTime.add(Duration(
-              seconds: (point['timeOffset'] ?? 0).toInt()
-          ));
+      // Track
+      builder.element('trk', nest: () {
+        builder.element('name', nest: 'Cycling Activity');
+        builder.element('type', nest: '9'); // Strava activity type for cycling
 
-        // Add elevation if available - IMPORTANT FOR STRAVA
-        if (point['ele'] != null && point['ele']! > 0) {
-          wpt.ele = point['ele'];
-        }
-
-        // Add heart rate and cadence as extensions if available
-        final extensions = <String, Object>{};
-
-        segment.trkpts.add(wpt);
-      }
-
-      // Ensure we have enough points for Strava (minimum 10 points)
-      if (segment.trkpts.length < 10) {
-        // Duplicate points to meet minimum requirement (Strava needs sufficient data)
-        final originalPoints = List<Wpt>.from(segment.trkpts);
-        while (segment.trkpts.length < 30) { // Aim for at least 30 points
-          for (final point in originalPoints) {
-            if (segment.trkpts.length >= 30) break;
-            segment.trkpts.add(point);
+        // Track segment
+        builder.element('trkseg', nest: () {
+          // Use detailed data points if available, otherwise use GPS points
+          if (session.dataPoints.isNotEmpty) {
+            _buildTrackPointsFromDataPoints(builder, session);
+          } else {
+            _buildTrackPointsFromGpsPoints(builder, session);
           }
-        }
+        });
+
+        // Add extensions for session summary
+        builder.element('extensions', nest: () {
+          _buildSessionExtensions(builder, session);
+        });
+      });
+
+      // Add extensions at root level for Strava compatibility
+      builder.element('extensions', nest: () {
+        _buildRootExtensions(builder, session);
+      });
+    });
+
+    final document = builder.buildDocument();
+    return document.toXmlString(pretty: true);
+  }
+
+  void _buildTrackPointsFromDataPoints(xml.XmlBuilder builder, RideSession session) {
+    for (final dataPoint in session.dataPoints) {
+      builder.element('trkpt', nest: () {
+        // Use actual GPS coordinates if available, otherwise use default
+        final gpsPoint = _findGpsPointForTimestamp(session.gpsPoints, dataPoint.timestamp);
+
+        builder.attribute('lat', gpsPoint?['lat'] ?? 0.0);
+        builder.attribute('lon', gpsPoint?['lon'] ?? 0.0);
+
+        builder.element('ele', nest: gpsPoint?['ele'] ?? dataPoint.altitude);
+        builder.element('time', nest: dataPoint.timestamp.toUtc().toIso8601String());
+
+        // Add sensor data as extensions (Strava compatible)
+        builder.element('extensions', nest: () {
+          builder.element('gpxtpx:TrackPointExtension', nest: () {
+            builder.element('gpxtpx:hr', nest: dataPoint.heartRate);
+            builder.element('gpxtpx:cad', nest: dataPoint.cadence);
+
+            // Power data - Strava will recognize this
+            if (dataPoint.power > 0) {
+              builder.element('gpxtpx:power', nest: dataPoint.power);
+            }
+
+            // Speed and distance
+            builder.element('gpxtpx:speed', nest: dataPoint.speed / 3.6); // Convert to m/s
+            builder.element('gpxtpx:distance', nest: dataPoint.distance * 1000); // Convert to meters
+          });
+        });
+      });
+    }
+  }
+
+  void _buildTrackPointsFromGpsPoints(xml.XmlBuilder builder, RideSession session) {
+    for (final point in session.gpsPoints) {
+      builder.element('trkpt', nest: () {
+        builder.attribute('lat', point['lat'] ?? 0.0);
+        builder.attribute('lon', point['lon'] ?? 0.0);
+
+        builder.element('ele', nest: point['ele'] ?? 0.0);
+
+        final time = session.startTime.add(Duration(
+            seconds: (point['timeOffset'] ?? 0).toInt()
+        ));
+        builder.element('time', nest: time.toUtc().toIso8601String());
+
+        // Add extensions even for basic GPS points
+        builder.element('extensions', nest: () {
+          builder.element('gpxtpx:TrackPointExtension', nest: () {
+            // Add average values for the session
+            builder.element('gpxtpx:hr', nest: session.avgHeartRate);
+            builder.element('gpxtpx:cad', nest: session.avgCadence);
+            builder.element('gpxtpx:power', nest: session.avgPower);
+          });
+        });
+      });
+    }
+  }
+
+  Map<String, double>? _findGpsPointForTimestamp(List<Map<String, double>> gpsPoints, DateTime timestamp) {
+    if (gpsPoints.isEmpty) return null;
+
+    // Find the closest GPS point by time
+    final sessionStart = timestamp;
+    for (final point in gpsPoints) {
+      final pointTime = sessionStart.add(Duration(seconds: (point['timeOffset'] ?? 0).toInt()));
+      if ((pointTime.difference(timestamp).inSeconds).abs() < 10) {
+        return point;
       }
-
-      track.trksegs.add(segment);
-      gpx.trks.add(track);
-    } else {
-      // If no GPS points, create multiple points to make Strava happy
-      final track = Trk()
-        ..name = 'Cycling Activity'
-        ..type = '9';
-
-      final segment = Trkseg();
-
-      // Create multiple points instead of just one
-      for (int i = 0; i < 30; i++) {
-        segment.trkpts.add(Wpt()
-          ..lat = 0.0 + (i * 0.0001) // Slight variation
-          ..lon = 0.0 + (i * 0.0001) // Slight variation
-          ..time = session.startTime.add(Duration(seconds: i * 10))
-          ..ele = 0.0);
-      }
-
-      track.trksegs.add(segment);
-      gpx.trks.add(track);
     }
 
-    // Add all metrics as extensions - using Map<String, Object> type
-    gpx.extensions = <String, Object>{
-      'deviceName': session.deviceName ?? '',
-      'durationSeconds': session.durationSeconds.toString(),
-      'avgPower': session.avgPower.toString(),
-      'maxPower': session.maxPower.toString(),
-      'distance': session.distance.toString(),
-      'calories': session.calories.toString(),
-      'kiloJoules': session.kiloJoules.toString(),
-      'normalizedPower': session.normalizedPower.toString(),
-      'avgSpeed': session.avgSpeed.toString(),
-      'maxSpeed': session.maxSpeed.toString(),
-      'wattsPerKilo': session.wattsPerKilo.toString(),
-      'power3sAvg': session.power3sAvg.toString(),
-      'ftpPercentage': session.ftpPercentage.toString(),
-      'hrZone': session.hrZone.toString(),
-      'avgHeartRate': session.avgHeartRate.toString(),
-      'maxHeartRate': session.maxHeartRate.toString(),
-      'avgCadence': session.avgCadence.toString(),
-      'maxCadence': session.maxCadence.toString(),
-      'power10sAvg': session.power10sAvg.toString(),
-      'power20sAvg': session.power20sAvg.toString(),
-      'ftpZone': session.ftpZone.toString(),
-      'altitude': session.altitude.toString(),
-      'altitudeGain': session.altitudeGain.toString(),
-      'maxAltitude': session.maxAltitude.toString(),
+    return gpsPoints.first;
+  }
 
-      // Strava-specific metadata
-      'sport': 'cycling',
-      'totalAscent': session.altitudeGain.toString(),
-      'totalDescent': '0',
-    };
+  void _buildSessionExtensions(xml.XmlBuilder builder, RideSession session) {
+    builder.element('gpxx:TrackExtension', nest: () {
+      builder.element('gpxx:DisplayColor', nest: 'Red'); // Strava color
+    });
+  }
 
-    // Write to file with proper XML declaration for Strava
-    final writer = GpxWriter();
-    final gpxString = writer.asString(gpx);
+  void _buildRootExtensions(xml.XmlBuilder builder, RideSession session) {
+    builder.element('power', nest: session.avgPower);
+    builder.element('total_elevation_gain', nest: session.altitudeGain.toStringAsFixed(1));
+    builder.element('elevation_gain', nest: session.altitudeGain.toStringAsFixed(1));
+    builder.element('max_elevation', nest: session.maxAltitude.toStringAsFixed(1));
 
-    // Ensure proper XML declaration
-    final xmlWithDeclaration = '<?xml version="1.0" encoding="UTF-8"?>\n$gpxString';
+    // Device info
+    if (session.deviceName != null) {
+      builder.element('device', nest: session.deviceName!);
+    }
 
-    await file.writeAsString(xmlWithDeclaration);
+    // Power metrics
+    builder.element('avg_power', nest: session.avgPower);
+    builder.element('max_power', nest: session.maxPower);
+    builder.element('normalized_power', nest: session.normalizedPower.toStringAsFixed(0));
+    builder.element('intensity_factor', nest: (session.normalizedPower / (session.ftpPercentage > 0 ? session.ftpPercentage : 250)).toStringAsFixed(2));
+    builder.element('training_stress_score', nest: _calculateTSS(session).toStringAsFixed(0));
+
+    // Heart rate metrics
+    builder.element('avg_heart_rate', nest: session.avgHeartRate);
+    builder.element('max_heart_rate', nest: session.maxHeartRate);
+
+    // Cadence metrics
+    builder.element('avg_cadence', nest: session.avgCadence);
+    builder.element('max_cadence', nest: session.maxCadence);
+
+    // Speed metrics
+    builder.element('avg_speed', nest: (session.avgSpeed / 3.6).toStringAsFixed(2)); // m/s
+    builder.element('max_speed', nest: (session.maxSpeed / 3.6).toStringAsFixed(2)); // m/s
+
+    // Energy metrics
+    builder.element('calories', nest: session.calories.toStringAsFixed(0));
+    builder.element('kilojoules', nest: session.kiloJoules);
+  }
+
+  double _calculateTSS(RideSession session) {
+    if (session.durationSeconds == 0 || session.ftpPercentage == 0) return 0;
+
+    final hours = session.durationSeconds / 3600;
+    final intensity = session.normalizedPower / (session.ftpPercentage > 0 ? session.ftpPercentage : 250);
+
+    return (session.durationSeconds * session.normalizedPower * intensity) / ((session.ftpPercentage > 0 ? session.ftpPercentage : 250) * 3600) * 100;
   }
 
   String _formatDuration(Duration d) {
@@ -260,6 +327,9 @@ class GpxStorageService {
           }
         }
 
+        // Create empty data points list for now (we'll need to parse these from the enhanced GPX later)
+        final dataPoints = <RideDataPoint>[];
+
         sessions.add(RideSession(
           id: file.path.split(Platform.pathSeparator).last.replaceAll('.gpx', ''),
           startTime: gpx.metadata?.time ?? DateTime.now(),
@@ -268,6 +338,7 @@ class GpxStorageService {
           maxPower: int.tryParse(maxPower ?? '0') ?? 0,
           deviceName: deviceName,
           gpsPoints: gpsPoints,
+          dataPoints: dataPoints, // Add empty list for now
           avgHeartRate: int.tryParse(avgHeartRate ?? '0') ?? 0,
           maxHeartRate: int.tryParse(maxHeartRate ?? '0') ?? 0,
           avgCadence: int.tryParse(avgCadence ?? '0') ?? 0,

@@ -137,6 +137,7 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
   void _startRide() {
     setState(() {
       controller.startRide();
+      controller.startDataCollection();
       _startTimers();
       _startGpsRecording();
     });

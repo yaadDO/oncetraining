@@ -6,15 +6,11 @@ class RideSession {
   final int maxPower;
   final String? deviceName;
   final List<Map<String, double>> gpsPoints;
-
-
-  // Sensor metrics
+  final List<RideDataPoint> dataPoints;
   final int avgHeartRate;
   final int maxHeartRate;
   final int avgCadence;
   final int maxCadence;
-
-  // Additional metrics
   final double distance;
   final double calories;
   final int kiloJoules;
@@ -40,12 +36,11 @@ class RideSession {
     required this.maxPower,
     this.deviceName,
     required this.gpsPoints,
-    // Initialize new fields with default values
+    required this.dataPoints,
     this.avgHeartRate = 0,
     this.maxHeartRate = 0,
     this.avgCadence = 0,
     this.maxCadence = 0,
-    // Additional metrics
     required this.distance,
     required this.calories,
     required this.kiloJoules,
@@ -56,8 +51,6 @@ class RideSession {
     required this.power3sAvg,
     required this.ftpPercentage,
     required this.hrZone,
-
-    // New metrics with defaults
     this.power10sAvg = 0,
     this.power20sAvg = 0,
     this.ftpZone = 0,
@@ -65,4 +58,48 @@ class RideSession {
     this.altitudeGain = 0.0,
     this.maxAltitude = 0.0,
   });
+}
+
+class RideDataPoint {
+  final DateTime timestamp;
+  final int power;
+  final int heartRate;
+  final int cadence;
+  final double speed;
+  final double distance;
+  final double altitude;
+
+  RideDataPoint({
+    required this.timestamp,
+    required this.power,
+    required this.heartRate,
+    required this.cadence,
+    required this.speed,
+    required this.distance,
+    required this.altitude,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'timestamp': timestamp.toIso8601String(),
+      'power': power,
+      'heartRate': heartRate,
+      'cadence': cadence,
+      'speed': speed,
+      'distance': distance,
+      'altitude': altitude,
+    };
+  }
+
+  factory RideDataPoint.fromJson(Map<String, dynamic> json) {
+    return RideDataPoint(
+      timestamp: DateTime.parse(json['timestamp']),
+      power: json['power'] ?? 0,
+      heartRate: json['heartRate'] ?? 0,
+      cadence: json['cadence'] ?? 0,
+      speed: json['speed']?.toDouble() ?? 0.0,
+      distance: json['distance']?.toDouble() ?? 0.0,
+      altitude: json['altitude']?.toDouble() ?? 0.0,
+    );
+  }
 }

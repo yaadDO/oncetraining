@@ -1,12 +1,11 @@
 import 'dart:async';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:geolocator/geolocator.dart'; // ADD THIS IMPORT
-
+import 'package:geolocator/geolocator.dart';
 import '../../../core/services/gpx_storage_service.dart';
 import '../../../core/services/preferences_service.dart';
 import '../../../core/utils/formatters.dart';
-import '../../../core/domain/sensor_type.dart'; // ADD THIS IMPORT
+import '../../../core/domain/sensor_type.dart';
 import '../../domain/metric_model.dart';
 import '../../domain/ride_data.dart';
 import '../../domain/ride_session.dart';
@@ -21,6 +20,7 @@ class CycleScreenController {
   final RideService rideService;
   final GpxStorageService storageService;
   final PreferencesService preferencesService;
+  final List<RideDataPoint> _dataPoints = [];
 
   final SensorConnectionManager sensorManager = SensorConnectionManager();
   final TimerManager timerManager = TimerManager();
@@ -32,11 +32,9 @@ class CycleScreenController {
   List<MetricBlock> allMetrics = [];
   final List<int> _cadence3sBuffer = [];
   final List<int> _cadence10sBuffer = [];
-
-  // User settings (loaded from preferences)
-  double userWeight = 70.0; // kg
-  int userFtp = 250; // watts
-  int userMaxHr = 190; // bpm
+  double userWeight = 67.0;
+  int userFtp = 320;
+  int userMaxHr = 201;
 
   CycleScreenController({
     required this.rideService,
@@ -155,12 +153,36 @@ class CycleScreenController {
     rideData.power20sAvg = 0;
     rideData.ftpZone = 0;
     rideData.lapMaxSpeed = 0.0;
-
-    // Reset altitude
     dataProcessor.currentAltitude = 0.0;
     dataProcessor.maxAltitude = 0.0;
     dataProcessor.totalAltitudeGain = 0.0;
     dataProcessor.lastRecordedAltitude = 0.0;
+  }
+
+  void _collectDataPoint() {
+    if (!rideData.isRiding) return;
+
+    final dataPoint = RideDataPoint(
+      timestamp: DateTime.now(),
+      power: rideData.currentPower,
+      heartRate: rideData.heartRate,
+      cadence: rideData.cadence,
+      speed: rideData.currentSpeed,
+      distance: rideData.distance,
+      altitude: dataProcessor.currentAltitude,
+    );
+
+    _dataPoints.add(dataPoint);
+  }
+
+  void startDataCollection() {
+    Timer.periodic(Duration(seconds: 3), (timer) {
+      if (rideData.isRiding) {
+        _collectDataPoint();
+      } else {
+        timer.cancel();
+      }
+    });
   }
 
   void resetLap() {
@@ -173,10 +195,8 @@ class CycleScreenController {
     rideData.lapMaxPower = 0;
     rideData.lapNormalised = 0.0;
     rideData.lapMaxSpeed = 0.0;
-
     dataProcessor.clearLapBuffers();
 
-    // Reset lap metrics display
     updateMetric('lap_time', formatDuration(rideData.lapDuration));
     updateMetric('lap_avg_speed', '0.0');
     updateMetric('lap_avg_power', '0');
@@ -188,10 +208,8 @@ class CycleScreenController {
   }
 
   void startLap() {
-    // Save previous lap data if this isn't the first lap
     if (timerManager.lapTimer != null) {
       calculateLapAverages();
-
       rideData.lastLapAvgPower = rideData.lapAvgPower;
       rideData.lastLapMaxPower = rideData.lapMaxPower;
       rideData.lastLapAvgSpeed = rideData.lapAvgSpeed;
@@ -199,8 +217,6 @@ class CycleScreenController {
       rideData.lastLapTime = rideData.lapDuration;
       rideData.lastLapAvgHr = rideData.lapAvgHeartRate;
       rideData.lastLapAvgCadence = rideData.lapAvgCadence;
-
-      // Update metrics for last lap
       updateMetric('last_lap_avg_power', '${rideData.lastLapAvgPower}');
       updateMetric('last_lap_max_power', '${rideData.lastLapMaxPower}');
       updateMetric('last_lap_avg_speed', rideData.lastLapAvgSpeed.toStringAsFixed(1));
@@ -213,7 +229,6 @@ class CycleScreenController {
     rideData.lapCount++;
     updateMetric('lap_count', '${rideData.lapCount}');
 
-    // Reset lap distance in ride service
     rideService.resetLap();
 
     resetLap();
@@ -539,6 +554,7 @@ class CycleScreenController {
       altitude: dataProcessor.currentAltitude,
       altitudeGain: dataProcessor.totalAltitudeGain,
       maxAltitude: dataProcessor.maxAltitude,
+      dataPoints: _dataPoints,
     );
 
     await storageService.saveSession(session);
