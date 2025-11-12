@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:geolocator/geolocator.dart';
 import '../../../core/services/gpx_storage_service.dart';
 import '../../../core/services/preferences_service.dart';
 import '../../../core/utils/formatters.dart';
-import '../../../core/domain/sensor_type.dart';
 import '../../domain/metric_model.dart';
 import '../../domain/ride_data.dart';
 import '../../domain/ride_session.dart';
@@ -21,7 +19,6 @@ class CycleScreenController {
   final GpxStorageService storageService;
   final PreferencesService preferencesService;
   final List<RideDataPoint> _dataPoints = [];
-
   final SensorConnectionManager sensorManager = SensorConnectionManager();
   final TimerManager timerManager = TimerManager();
   final MetricsDataProcessor dataProcessor = MetricsDataProcessor();
@@ -32,6 +29,7 @@ class CycleScreenController {
   List<MetricBlock> allMetrics = [];
   final List<int> _cadence3sBuffer = [];
   final List<int> _cadence10sBuffer = [];
+  final List<LapData> _laps = [];
   double userWeight = 67.0;
   int userFtp = 320;
   int userMaxHr = 201;
@@ -120,13 +118,8 @@ class CycleScreenController {
   void startRide() {
     rideState.startRide();
     rideData.isRiding = true;
-
-    // Clear all buffers
     dataProcessor.clearAllBuffers();
-
-    // Reset metrics
     _resetRideMetrics();
-
     rideService.reset();
     resetLap();
   }
@@ -210,6 +203,7 @@ class CycleScreenController {
   void startLap() {
     if (timerManager.lapTimer != null) {
       calculateLapAverages();
+      updateLapNormalisedPower();
       rideData.lastLapAvgPower = rideData.lapAvgPower;
       rideData.lastLapMaxPower = rideData.lapMaxPower;
       rideData.lastLapAvgSpeed = rideData.lapAvgSpeed;
@@ -219,20 +213,36 @@ class CycleScreenController {
       rideData.lastLapAvgCadence = rideData.lapAvgCadence;
       updateMetric('last_lap_avg_power', '${rideData.lastLapAvgPower}');
       updateMetric('last_lap_max_power', '${rideData.lastLapMaxPower}');
-      updateMetric('last_lap_avg_speed', rideData.lastLapAvgSpeed.toStringAsFixed(1));
-      updateMetric('last_lap_distance', rideData.lastLapDistance.toStringAsFixed(2));
+      updateMetric(
+          'last_lap_avg_speed', rideData.lastLapAvgSpeed.toStringAsFixed(1));
+      updateMetric(
+          'last_lap_distance', rideData.lastLapDistance.toStringAsFixed(2));
       updateMetric('last_lap_time', formatDuration(rideData.lastLapTime));
       updateMetric('last_lap_avg_hr', '${rideData.lastLapAvgHr}');
       updateMetric('last_lap_avg_cadence', '${rideData.lastLapAvgCadence}');
+
+      final lapData = LapData(
+        lapNumber: rideData.lapCount + 1,
+        duration: rideData.lapDuration,
+        distance: rideData.lapDistance,
+        avgPower: rideData.lapAvgPower,
+        maxPower: rideData.lapMaxPower,
+        avgSpeed: rideData.lapAvgSpeed,
+        maxSpeed: rideData.lapMaxSpeed,
+        avgHeartRate: rideData.lapAvgHeartRate,
+        avgCadence: rideData.lapAvgCadence,
+        normalizedPower: rideData.lapNormalised,
+      );
+      _laps.add(lapData);
+
+      rideData.lapCount++;
+      updateMetric('lap_count', '${rideData.lapCount}');
+
+      rideService.resetLap();
+
+      resetLap();
+      rideState.startLap();
     }
-
-    rideData.lapCount++;
-    updateMetric('lap_count', '${rideData.lapCount}');
-
-    rideService.resetLap();
-
-    resetLap();
-    rideState.startLap();
   }
 
   void stopLap() {
@@ -555,6 +565,7 @@ class CycleScreenController {
       altitudeGain: dataProcessor.totalAltitudeGain,
       maxAltitude: dataProcessor.maxAltitude,
       dataPoints: _dataPoints,
+      laps: _laps,
     );
 
     await storageService.saveSession(session);

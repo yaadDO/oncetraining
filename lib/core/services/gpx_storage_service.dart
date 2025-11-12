@@ -42,14 +42,15 @@ class GpxStorageService {
       builder.attribute('xmlns:gpxtpx', 'http://www.garmin.com/xmlschemas/TrackPointExtension/v1');
       builder.attribute('xmlns:gpxx', 'http://www.garmin.com/xmlschemas/GpxExtensions/v3');
 
-      // Metadata
+      // Metadata with ALL session data
       builder.element('metadata', nest: () {
         builder.element('name', nest: 'Cycling Activity - ${DateFormat('yyyy-MM-dd HH:mm').format(session.startTime)}');
         builder.element('time', nest: session.startTime.toUtc().toIso8601String());
-        builder.element('desc', nest:
-        'Power: ${session.avgPower}W avg, ${session.maxPower}W max | '
-            'Distance: ${session.distance.toStringAsFixed(2)}km | '
-            'Duration: ${_formatDuration(Duration(seconds: session.durationSeconds))}');
+
+        // Store ALL session data as extensions in metadata
+        builder.element('extensions', nest: () {
+          _buildSessionMetadataExtensions(builder, session);
+        });
       });
 
       // Track
@@ -66,21 +67,64 @@ class GpxStorageService {
             _buildTrackPointsFromGpsPoints(builder, session);
           }
         });
-
-        // Add extensions for session summary
-        builder.element('extensions', nest: () {
-          _buildSessionExtensions(builder, session);
-        });
-      });
-
-      // Add extensions at root level for Strava compatibility
-      builder.element('extensions', nest: () {
-        _buildRootExtensions(builder, session);
       });
     });
 
     final document = builder.buildDocument();
     return document.toXmlString(pretty: true);
+  }
+
+  void _buildSessionMetadataExtensions(xml.XmlBuilder builder, RideSession session) {
+    // Store all session data as simple key-value pairs
+    builder.element('session_id', nest: session.id);
+    builder.element('start_time', nest: session.startTime.toIso8601String());
+    builder.element('duration_seconds', nest: session.durationSeconds);
+    builder.element('avg_power', nest: session.avgPower);
+    builder.element('max_power', nest: session.maxPower);
+    builder.element('avg_heart_rate', nest: session.avgHeartRate);
+    builder.element('max_heart_rate', nest: session.maxHeartRate);
+    builder.element('avg_cadence', nest: session.avgCadence);
+    builder.element('max_cadence', nest: session.maxCadence);
+    builder.element('distance', nest: session.distance);
+    builder.element('calories', nest: session.calories);
+    builder.element('kilo_joules', nest: session.kiloJoules);
+    builder.element('normalized_power', nest: session.normalizedPower);
+    builder.element('avg_speed', nest: session.avgSpeed);
+    builder.element('max_speed', nest: session.maxSpeed);
+    builder.element('watts_per_kilo', nest: session.wattsPerKilo);
+    builder.element('power_3s_avg', nest: session.power3sAvg);
+    builder.element('ftp_percentage', nest: session.ftpPercentage);
+    builder.element('hr_zone', nest: session.hrZone);
+    builder.element('power_10s_avg', nest: session.power10sAvg);
+    builder.element('power_20s_avg', nest: session.power20sAvg);
+    builder.element('ftp_zone', nest: session.ftpZone);
+    builder.element('altitude', nest: session.altitude);
+    builder.element('altitude_gain', nest: session.altitudeGain);
+    builder.element('max_altitude', nest: session.maxAltitude);
+
+    if (session.deviceName != null) {
+      builder.element('device_name', nest: session.deviceName!);
+    }
+
+    // Save lap data
+    if (session.laps.isNotEmpty) {
+      builder.element('laps', nest: () {
+        for (final lap in session.laps) {
+          builder.element('lap', nest: () {
+            builder.element('lap_number', nest: lap.lapNumber);
+            builder.element('lap_duration', nest: lap.duration.inSeconds);
+            builder.element('lap_distance', nest: lap.distance);
+            builder.element('lap_avg_power', nest: lap.avgPower);
+            builder.element('lap_max_power', nest: lap.maxPower);
+            builder.element('lap_avg_speed', nest: lap.avgSpeed);
+            builder.element('lap_max_speed', nest: lap.maxSpeed);
+            builder.element('lap_avg_hr', nest: lap.avgHeartRate);
+            builder.element('lap_avg_cadence', nest: lap.avgCadence);
+            builder.element('lap_normalized_power', nest: lap.normalizedPower);
+          });
+        }
+      });
+    }
   }
 
   void _buildTrackPointsFromDataPoints(xml.XmlBuilder builder, RideSession session) {
@@ -95,20 +139,16 @@ class GpxStorageService {
         builder.element('ele', nest: gpsPoint?['ele'] ?? dataPoint.altitude);
         builder.element('time', nest: dataPoint.timestamp.toUtc().toIso8601String());
 
-        // Add sensor data as extensions (Strava compatible)
+        // Add sensor data as extensions
         builder.element('extensions', nest: () {
           builder.element('gpxtpx:TrackPointExtension', nest: () {
             builder.element('gpxtpx:hr', nest: dataPoint.heartRate);
             builder.element('gpxtpx:cad', nest: dataPoint.cadence);
-
-            // Power data - Strava will recognize this
             if (dataPoint.power > 0) {
               builder.element('gpxtpx:power', nest: dataPoint.power);
             }
-
-            // Speed and distance
-            builder.element('gpxtpx:speed', nest: dataPoint.speed / 3.6); // Convert to m/s
-            builder.element('gpxtpx:distance', nest: dataPoint.distance * 1000); // Convert to meters
+            builder.element('gpxtpx:speed', nest: dataPoint.speed / 3.6);
+            builder.element('gpxtpx:distance', nest: dataPoint.distance * 1000);
           });
         });
       });
@@ -120,23 +160,12 @@ class GpxStorageService {
       builder.element('trkpt', nest: () {
         builder.attribute('lat', point['lat'] ?? 0.0);
         builder.attribute('lon', point['lon'] ?? 0.0);
-
         builder.element('ele', nest: point['ele'] ?? 0.0);
 
         final time = session.startTime.add(Duration(
             seconds: (point['timeOffset'] ?? 0).toInt()
         ));
         builder.element('time', nest: time.toUtc().toIso8601String());
-
-        // Add extensions even for basic GPS points
-        builder.element('extensions', nest: () {
-          builder.element('gpxtpx:TrackPointExtension', nest: () {
-            // Add average values for the session
-            builder.element('gpxtpx:hr', nest: session.avgHeartRate);
-            builder.element('gpxtpx:cad', nest: session.avgCadence);
-            builder.element('gpxtpx:power', nest: session.avgPower);
-          });
-        });
       });
     }
   }
@@ -144,7 +173,6 @@ class GpxStorageService {
   Map<String, double>? _findGpsPointForTimestamp(List<Map<String, double>> gpsPoints, DateTime timestamp) {
     if (gpsPoints.isEmpty) return null;
 
-    // Find the closest GPS point by time
     final sessionStart = timestamp;
     for (final point in gpsPoints) {
       final pointTime = sessionStart.add(Duration(seconds: (point['timeOffset'] ?? 0).toInt()));
@@ -154,56 +182,6 @@ class GpxStorageService {
     }
 
     return gpsPoints.first;
-  }
-
-  void _buildSessionExtensions(xml.XmlBuilder builder, RideSession session) {
-    builder.element('gpxx:TrackExtension', nest: () {
-      builder.element('gpxx:DisplayColor', nest: 'Red'); // Strava color
-    });
-  }
-
-  void _buildRootExtensions(xml.XmlBuilder builder, RideSession session) {
-    builder.element('power', nest: session.avgPower);
-    builder.element('total_elevation_gain', nest: session.altitudeGain.toStringAsFixed(1));
-    builder.element('elevation_gain', nest: session.altitudeGain.toStringAsFixed(1));
-    builder.element('max_elevation', nest: session.maxAltitude.toStringAsFixed(1));
-
-    // Device info
-    if (session.deviceName != null) {
-      builder.element('device', nest: session.deviceName!);
-    }
-
-    // Power metrics
-    builder.element('avg_power', nest: session.avgPower);
-    builder.element('max_power', nest: session.maxPower);
-    builder.element('normalized_power', nest: session.normalizedPower.toStringAsFixed(0));
-    builder.element('intensity_factor', nest: (session.normalizedPower / (session.ftpPercentage > 0 ? session.ftpPercentage : 250)).toStringAsFixed(2));
-    builder.element('training_stress_score', nest: _calculateTSS(session).toStringAsFixed(0));
-
-    // Heart rate metrics
-    builder.element('avg_heart_rate', nest: session.avgHeartRate);
-    builder.element('max_heart_rate', nest: session.maxHeartRate);
-
-    // Cadence metrics
-    builder.element('avg_cadence', nest: session.avgCadence);
-    builder.element('max_cadence', nest: session.maxCadence);
-
-    // Speed metrics
-    builder.element('avg_speed', nest: (session.avgSpeed / 3.6).toStringAsFixed(2)); // m/s
-    builder.element('max_speed', nest: (session.maxSpeed / 3.6).toStringAsFixed(2)); // m/s
-
-    // Energy metrics
-    builder.element('calories', nest: session.calories.toStringAsFixed(0));
-    builder.element('kilojoules', nest: session.kiloJoules);
-  }
-
-  double _calculateTSS(RideSession session) {
-    if (session.durationSeconds == 0 || session.ftpPercentage == 0) return 0;
-
-    final hours = session.durationSeconds / 3600;
-    final intensity = session.normalizedPower / (session.ftpPercentage > 0 ? session.ftpPercentage : 250);
-
-    return (session.durationSeconds * session.normalizedPower * intensity) / ((session.ftpPercentage > 0 ? session.ftpPercentage : 250) * 3600) * 100;
   }
 
   String _formatDuration(Duration d) {
@@ -224,7 +202,6 @@ class GpxStorageService {
         return null;
       }
 
-      // Use app's documents directory (scoped storage)
       final appDocDir = await getApplicationDocumentsDirectory();
       final exportsDir = Directory('${appDocDir.path}/exports');
 
@@ -232,7 +209,6 @@ class GpxStorageService {
         await exportsDir.create(recursive: true);
       }
 
-      // Copy file to exports directory
       final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
       final destFile = File('${exportsDir.path}/Ride_${sessionId}_$timestamp.gpx');
 
@@ -246,12 +222,6 @@ class GpxStorageService {
     }
   }
 
-  void _showDownloadNotification(String filePath) {
-    // This would typically use flutter_local_notifications
-    print('File downloaded to: $filePath');
-  }
-
-  // ADD THIS METHOD TO GET THE GPX FILE FOR SHARING
   Future<File?> getSessionGpxFile(String sessionId) async {
     try {
       final dir = await _getAppDirectory();
@@ -275,93 +245,23 @@ class GpxStorageService {
         .toList();
 
     final sessions = <RideSession>[];
-    final reader = GpxReader();
 
     for (final file in files) {
       try {
         final contents = await file.readAsString();
-        final gpx = reader.fromString(contents);
+        final document = xml.XmlDocument.parse(contents);
 
-        // Extract values from extensions map
-        final deviceName = _getExtensionValue(gpx, 'deviceName');
-        final durationSeconds = _getExtensionValue(gpx, 'durationSeconds');
-        final avgPower = _getExtensionValue(gpx, 'avgPower');
-        final maxPower = _getExtensionValue(gpx, 'maxPower');
-        final distance = _getExtensionValue(gpx, 'distance');
-        final calories = _getExtensionValue(gpx, 'calories');
-        final kiloJoules = _getExtensionValue(gpx, 'kiloJoules');
-        final normalizedPower = _getExtensionValue(gpx, 'normalizedPower');
-        final avgSpeed = _getExtensionValue(gpx, 'avgSpeed');
-        final maxSpeed = _getExtensionValue(gpx, 'maxSpeed');
-        final wattsPerKilo = _getExtensionValue(gpx, 'wattsPerKilo');
-        final power3sAvg = _getExtensionValue(gpx, 'power3sAvg');
-        final ftpPercentage = _getExtensionValue(gpx, 'ftpPercentage');
-        final hrZone = _getExtensionValue(gpx, 'hrZone');
-        final avgHeartRate = _getExtensionValue(gpx, 'avgHeartRate');
-        final maxHeartRate = _getExtensionValue(gpx, 'maxHeartRate');
-        final avgCadence = _getExtensionValue(gpx, 'avgCadence');
-        final maxCadence = _getExtensionValue(gpx, 'maxCadence');
-        final power10sAvg = _getExtensionValue(gpx, 'power10sAvg');
-        final power20sAvg = _getExtensionValue(gpx, 'power20sAvg');
-        final ftpZone = _getExtensionValue(gpx, 'ftpZone');
-        final altitude = _getExtensionValue(gpx, 'altitude');
-        final altitudeGain = _getExtensionValue(gpx, 'altitudeGain');
-        final maxAltitude = _getExtensionValue(gpx, 'maxAltitude');
+        // Extract data from metadata extensions
+        final metadata = _parseMetadataExtensions(document);
 
-        // Extract GPS points
-        List<Map<String, double>> gpsPoints = [];
-        if (gpx.trks != null) {
-          for (Trk track in gpx.trks!) {
-            for (Trkseg segment in track.trksegs) {
-              for (Wpt point in segment.trkpts) {
-                gpsPoints.add({
-                  'lat': point.lat ?? 0.0,
-                  'lon': point.lon ?? 0.0,
-                  'ele': point.ele ?? 0.0,
-                  'timeOffset': point.time != null
-                      ? point.time!.difference(gpx.metadata?.time ?? DateTime.now()).inSeconds.toDouble()
-                      : 0.0,
-                });
-              }
-            }
-          }
-        }
+        // Create RideSession from parsed data
+        final session = _createSessionFromMetadata(metadata, file.path);
+        sessions.add(session);
 
-        // Create empty data points list for now (we'll need to parse these from the enhanced GPX later)
-        final dataPoints = <RideDataPoint>[];
-
-        sessions.add(RideSession(
-          id: file.path.split(Platform.pathSeparator).last.replaceAll('.gpx', ''),
-          startTime: gpx.metadata?.time ?? DateTime.now(),
-          durationSeconds: int.tryParse(durationSeconds ?? '0') ?? 0,
-          avgPower: int.tryParse(avgPower ?? '0') ?? 0,
-          maxPower: int.tryParse(maxPower ?? '0') ?? 0,
-          deviceName: deviceName,
-          gpsPoints: gpsPoints,
-          dataPoints: dataPoints, // Add empty list for now
-          avgHeartRate: int.tryParse(avgHeartRate ?? '0') ?? 0,
-          maxHeartRate: int.tryParse(maxHeartRate ?? '0') ?? 0,
-          avgCadence: int.tryParse(avgCadence ?? '0') ?? 0,
-          maxCadence: int.tryParse(maxCadence ?? '0') ?? 0,
-          distance: double.tryParse(distance ?? '0') ?? 0.0,
-          calories: double.tryParse(calories ?? '0') ?? 0.0,
-          kiloJoules: int.tryParse(kiloJoules ?? '0') ?? 0,
-          normalizedPower: double.tryParse(normalizedPower ?? '0') ?? 0.0,
-          avgSpeed: double.tryParse(avgSpeed ?? '0') ?? 0.0,
-          maxSpeed: double.tryParse(maxSpeed ?? '0') ?? 0.0,
-          wattsPerKilo: double.tryParse(wattsPerKilo ?? '0') ?? 0.0,
-          power3sAvg: int.tryParse(power3sAvg ?? '0') ?? 0,
-          ftpPercentage: double.tryParse(ftpPercentage ?? '0') ?? 0.0,
-          hrZone: int.tryParse(hrZone ?? '0') ?? 0,
-          power10sAvg: int.tryParse(power10sAvg ?? '0') ?? 0,
-          power20sAvg: int.tryParse(power20sAvg ?? '0') ?? 0,
-          ftpZone: int.tryParse(ftpZone ?? '0') ?? 0,
-          altitude: double.tryParse(altitude ?? '0') ?? 0.0,
-          altitudeGain: double.tryParse(altitudeGain ?? '0') ?? 0.0,
-          maxAltitude: double.tryParse(maxAltitude ?? '0') ?? 0.0,
-        ));
       } catch (e) {
         print('Error reading GPX file: ${file.path} - $e');
+        // Create a basic session with file info as fallback
+        sessions.add(_createFallbackSession(file.path));
       }
     }
 
@@ -369,15 +269,204 @@ class GpxStorageService {
     return sessions;
   }
 
-  String? _getExtensionValue(Gpx gpx, String key) {
-    if (gpx.extensions == null) return null;
+  Map<String, dynamic> _parseMetadataExtensions(xml.XmlDocument document) {
+    final Map<String, dynamic> data = {};
 
-    // Handle the type conversion safely
-    final value = gpx.extensions![key];
-    if (value is String) {
-      return value;
+    try {
+      // Get metadata element
+      final metadata = document.findAllElements('metadata').firstOrNull;
+      if (metadata == null) return data;
+
+      // Get extensions within metadata
+      final extensions = metadata.findElements('extensions').firstOrNull;
+      if (extensions == null) return data;
+
+      // Parse all extension elements
+      for (final element in extensions.childElements) {
+        final tag = element.name.local;
+        final text = element.text;
+
+        // Convert to appropriate types
+        if (text.isNotEmpty) {
+          switch (tag) {
+            case 'session_id':
+            case 'device_name':
+              data[tag] = text;
+              break;
+            case 'start_time':
+              data[tag] = DateTime.parse(text);
+              break;
+            case 'duration_seconds':
+            case 'avg_power':
+            case 'max_power':
+            case 'avg_heart_rate':
+            case 'max_heart_rate':
+            case 'avg_cadence':
+            case 'max_cadence':
+            case 'kilo_joules':
+            case 'power_3s_avg':
+            case 'hr_zone':
+            case 'power_10s_avg':
+            case 'power_20s_avg':
+            case 'ftp_zone':
+              data[tag] = int.tryParse(text) ?? 0;
+              break;
+            case 'distance':
+            case 'calories':
+            case 'normalized_power':
+            case 'avg_speed':
+            case 'max_speed':
+            case 'watts_per_kilo':
+            case 'ftp_percentage':
+            case 'altitude':
+            case 'altitude_gain':
+            case 'max_altitude':
+              data[tag] = double.tryParse(text) ?? 0.0;
+              break;
+            case 'laps':
+            // Parse lap data
+              final laps = _parseLapsData(element);
+              data['laps'] = laps;
+              break;
+          }
+        }
+      }
+    } catch (e) {
+      print('Error parsing metadata extensions: $e');
     }
-    return value?.toString();
+
+    return data;
+  }
+
+  List<LapData> _parseLapsData(xml.XmlElement lapsElement) {
+    final laps = <LapData>[];
+
+    try {
+      for (final lapElement in lapsElement.findElements('lap')) {
+        final lapData = <String, dynamic>{};
+
+        for (final element in lapElement.childElements) {
+          final tag = element.name.local;
+          final text = element.text;
+
+          if (text.isNotEmpty) {
+            switch (tag) {
+              case 'lap_number':
+              case 'lap_avg_power':
+              case 'lap_max_power':
+              case 'lap_avg_hr':
+              case 'lap_avg_cadence':
+                lapData[tag] = int.tryParse(text) ?? 0;
+                break;
+              case 'lap_duration':
+                lapData[tag] = int.tryParse(text) ?? 0;
+                break;
+              case 'lap_distance':
+              case 'lap_avg_speed':
+              case 'lap_max_speed':
+              case 'lap_normalized_power':
+                lapData[tag] = double.tryParse(text) ?? 0.0;
+                break;
+            }
+          }
+        }
+
+        // Create LapData object from parsed data
+        if (lapData.isNotEmpty) {
+          laps.add(LapData(
+            lapNumber: lapData['lap_number'] ?? 0,
+            duration: Duration(seconds: lapData['lap_duration'] ?? 0),
+            distance: lapData['lap_distance']?.toDouble() ?? 0.0,
+            avgPower: lapData['lap_avg_power'] ?? 0,
+            maxPower: lapData['lap_max_power'] ?? 0,
+            avgSpeed: lapData['lap_avg_speed']?.toDouble() ?? 0.0,
+            maxSpeed: lapData['lap_max_speed']?.toDouble() ?? 0.0,
+            avgHeartRate: lapData['lap_avg_hr'] ?? 0,
+            avgCadence: lapData['lap_avg_cadence'] ?? 0,
+            normalizedPower: lapData['lap_normalized_power']?.toDouble() ?? 0.0,
+          ));
+        }
+      }
+    } catch (e) {
+      print('Error parsing laps data: $e');
+    }
+
+    return laps;
+  }
+
+  RideSession _createSessionFromMetadata(Map<String, dynamic> data, String filePath) {
+    final id = data['session_id'] ?? filePath.split('/').last.replaceAll('.gpx', '');
+    final startTime = data['start_time'] as DateTime? ?? DateTime.now();
+
+    // Parse laps from data
+    final laps = data['laps'] as List<LapData>? ?? [];
+
+    return RideSession(
+      id: id,
+      startTime: startTime,
+      durationSeconds: data['duration_seconds'] ?? 0,
+      avgPower: data['avg_power'] ?? 0,
+      maxPower: data['max_power'] ?? 0,
+      deviceName: data['device_name']?.toString(),
+      gpsPoints: [], // We don't need GPS points for history list
+      dataPoints: [], // We don't need data points for history list
+      avgHeartRate: data['avg_heart_rate'] ?? 0,
+      maxHeartRate: data['max_heart_rate'] ?? 0,
+      avgCadence: data['avg_cadence'] ?? 0,
+      maxCadence: data['max_cadence'] ?? 0,
+      distance: data['distance']?.toDouble() ?? 0.0,
+      calories: data['calories']?.toDouble() ?? 0.0,
+      kiloJoules: data['kilo_joules'] ?? 0,
+      normalizedPower: data['normalized_power']?.toDouble() ?? 0.0,
+      avgSpeed: data['avg_speed']?.toDouble() ?? 0.0,
+      maxSpeed: data['max_speed']?.toDouble() ?? 0.0,
+      wattsPerKilo: data['watts_per_kilo']?.toDouble() ?? 0.0,
+      power3sAvg: data['power_3s_avg'] ?? 0,
+      ftpPercentage: data['ftp_percentage']?.toDouble() ?? 0.0,
+      hrZone: data['hr_zone'] ?? 0,
+      power10sAvg: data['power_10s_avg'] ?? 0,
+      power20sAvg: data['power_20s_avg'] ?? 0,
+      ftpZone: data['ftp_zone'] ?? 0,
+      altitude: data['altitude']?.toDouble() ?? 0.0,
+      altitudeGain: data['altitude_gain']?.toDouble() ?? 0.0,
+      maxAltitude: data['max_altitude']?.toDouble() ?? 0.0,
+      laps: laps, // Add the parsed laps
+    );
+  }
+
+  RideSession _createFallbackSession(String filePath) {
+    final id = filePath.split('/').last.replaceAll('.gpx', '');
+    return RideSession(
+      id: id,
+      startTime: DateTime.now(),
+      durationSeconds: 0,
+      avgPower: 0,
+      maxPower: 0,
+      deviceName: null,
+      gpsPoints: [],
+      dataPoints: [],
+      avgHeartRate: 0,
+      maxHeartRate: 0,
+      avgCadence: 0,
+      maxCadence: 0,
+      distance: 0.0,
+      calories: 0.0,
+      kiloJoules: 0,
+      normalizedPower: 0.0,
+      avgSpeed: 0.0,
+      maxSpeed: 0.0,
+      wattsPerKilo: 0.0,
+      power3sAvg: 0,
+      ftpPercentage: 0.0,
+      hrZone: 0,
+      power10sAvg: 0,
+      power20sAvg: 0,
+      ftpZone: 0,
+      altitude: 0.0,
+      altitudeGain: 0.0,
+      maxAltitude: 0.0,
+      laps: [], // Empty laps for fallback
+    );
   }
 
   Future<void> deleteSession(String id) async {

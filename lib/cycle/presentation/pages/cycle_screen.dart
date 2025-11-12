@@ -96,6 +96,7 @@ class PowerDisplayScreenState extends State<PowerDisplayScreen> {
 
   Future<void> _initializeController() async {
     await controller.initializeMetrics();
+    _powerService.setWheelCircumference(controller.rideData.wheelCircumference);
   }
 
   Future<void> _requestLocationPermission() async {

@@ -27,6 +27,7 @@ class RideSession {
   final double altitude;
   final double altitudeGain;
   final double maxAltitude;
+  final List<LapData> laps;
 
   RideSession({
     required this.id,
@@ -57,6 +58,7 @@ class RideSession {
     this.altitude = 0.0,
     this.altitudeGain = 0.0,
     this.maxAltitude = 0.0,
+    this.laps = const [],
   });
 }
 
@@ -100,6 +102,62 @@ class RideDataPoint {
       speed: json['speed']?.toDouble() ?? 0.0,
       distance: json['distance']?.toDouble() ?? 0.0,
       altitude: json['altitude']?.toDouble() ?? 0.0,
+    );
+  }
+}
+
+class LapData {
+  final int lapNumber;
+  final Duration duration;
+  final double distance;
+  final int avgPower;
+  final int maxPower;
+  final double avgSpeed;
+  final double maxSpeed;
+  final int avgHeartRate;
+  final int avgCadence;
+  final double normalizedPower;
+
+  LapData({
+    required this.lapNumber,
+    required this.duration,
+    required this.distance,
+    required this.avgPower,
+    required this.maxPower,
+    required this.avgSpeed,
+    required this.maxSpeed,
+    required this.avgHeartRate,
+    required this.avgCadence,
+    required this.normalizedPower,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'lapNumber': lapNumber,
+      'duration': duration.inSeconds,
+      'distance': distance,
+      'avgPower': avgPower,
+      'maxPower': maxPower,
+      'avgSpeed': avgSpeed,
+      'maxSpeed': maxSpeed,
+      'avgHeartRate': avgHeartRate,
+      'avgCadence': avgCadence,
+      'normalizedPower': normalizedPower,
+    };
+  }
+
+  factory LapData.fromJson(Map<String, dynamic> json) {
+    return LapData(
+      lapNumber: json['lapNumber'] ?? 0,
+      duration: Duration(seconds: json['duration'] ?? 0),
+      distance: json['distance']?.toDouble() ?? 0.0,
+      avgPower: json['avgPower'] ?? 0,
+      maxPower: json['maxPower'] ?? 0,
+      avgSpeed: json['avgSpeed']?.toDouble() ?? 0.0,
+      maxSpeed: json['maxSpeed']?.toDouble() ?? 0.0,
+      avgHeartRate: json['avgHeartRate'] ?? 0,
+      avgCadence: json['avgCadence'] ?? 0,
+      normalizedPower: json['normalizedPower']?.toDouble() ?? 0.0,
     );
   }
 }

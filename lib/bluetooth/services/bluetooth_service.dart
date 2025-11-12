@@ -1,30 +1,18 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
-
 import '../../core/utils/permissions.dart';
-import '../../core/domain/sensor_type.dart'; // ADD THIS IMPORT
-
-// REMOVE THIS DUPLICATE ENUM:
-// enum SensorType {
-//   powerMeter,
-//   heartRate,
-//   cadence,
-//   speed,
-// }
+import '../../core/domain/sensor_type.dart';
 
 class PowerMeterService {
   static final Guid CYCLING_POWER_SERVICE = Guid("00001818-0000-1000-8000-00805f9b34fb");
   static final Guid POWER_MEASUREMENT_CHAR = Guid("00002A63-0000-1000-8000-00805f9b34fb");
 
-  // New sensor UUIDs
   static final Guid HEART_RATE_SERVICE = Guid("0000180D-0000-1000-8000-00805f9b34fb");
   static final Guid HEART_RATE_MEASUREMENT_CHAR = Guid("00002A37-0000-1000-8000-00805f9b34fb");
   static final Guid CYCLING_SPEED_CADENCE_SERVICE = Guid("00001816-0000-1000-8000-00805f9b34fb");
   static final Guid CSC_MEASUREMENT_CHAR = Guid("00002A5B-0000-1000-8000-00805f9b34fb");
 
-  // Track devices for each sensor type
   final Map<SensorType, BluetoothDevice?> _devices = {
     SensorType.powerMeter: null,
     SensorType.heartRate: null,
@@ -32,7 +20,6 @@ class PowerMeterService {
     SensorType.speed: null,
   };
 
-  // Track characteristics for each sensor type
   final Map<SensorType, BluetoothCharacteristic?> _characteristics = {
     SensorType.powerMeter: null,
     SensorType.heartRate: null,
@@ -40,7 +27,6 @@ class PowerMeterService {
     SensorType.speed: null,
   };
 
-  // Track connection status for each sensor type
   final Map<SensorType, String> _connectionStatus = {
     SensorType.powerMeter: "Not connected",
     SensorType.heartRate: "Not connected",
@@ -48,7 +34,6 @@ class PowerMeterService {
     SensorType.speed: "Not connected",
   };
 
-  // Track connection errors for each sensor type
   final Map<SensorType, bool> _connectionErrors = {
     SensorType.powerMeter: false,
     SensorType.heartRate: false,
@@ -56,26 +41,19 @@ class PowerMeterService {
     SensorType.speed: false,
   };
 
-  // Add this to track if cadence is coming from power meter
   bool _cadenceFromPowerMeter = false;
   bool get cadenceFromPowerMeter => _cadenceFromPowerMeter;
 
-  final List<int> _cadenceBuffer = [];
-  static const int _cadenceBufferSize = 6;
-
-  // Add these for device scanning
   final _foundDevices = <BluetoothDevice>[];
   final _scanResultsController = StreamController<List<BluetoothDevice>>.broadcast();
   Stream<List<BluetoothDevice>> get scanResults => _scanResultsController.stream;
   bool _isScanning = false;
   SensorType? _currentScanType;
 
-  // Data streams
   final _powerController = StreamController<int>.broadcast();
   final _heartRateController = StreamController<int>.broadcast();
   final _cadenceController = StreamController<int>.broadcast();
   final _speedController = StreamController<double>.broadcast();
-  final List<int> _powerHistory = [];
   final Random _random = Random();
 
   Stream<int> get powerStream => _powerController.stream;
@@ -83,29 +61,34 @@ class PowerMeterService {
   Stream<int> get cadenceStream => _cadenceController.stream;
   Stream<double> get speedStream => _speedController.stream;
 
-  // FIX: Instance variables for cadence calculation (not static)
   int _lastCumulativeRevs = 0;
   int _lastEventTime = 0;
   int _lastCadence = 0;
-
-  // FIX: Instance variables for speed calculation
   int _lastCumulativeWheelRevs = 0;
   int _lastWheelEventTime = 0;
   double _lastSpeed = 0.0;
 
-  // Add method to get connection status
+  // Add these fields for speed smoothing and wheel circumference
+  double _wheelCircumference = 2.1; // Default, will be updated from user settings
+  final List<double> _speedBuffer = []; // For smoothing
+  static const int _speedBufferSize = 5; // Number of samples to average
+  Timer? _speedResetTimer;
+  DateTime? _lastValidSpeedTime;
+  int _duplicateCount = 0;
+
   String getConnectionStatus(SensorType type) => _connectionStatus[type]!;
-
-  // Add method to check if there's an error
   bool hasConnectionError(SensorType type) => _connectionErrors[type]!;
-
-  // Add method to check if connected
   bool isConnected(SensorType type) => _connectionStatus[type] == "Connected";
+
+  // Add setter for wheel circumference
+  void setWheelCircumference(double circumference) {
+    _wheelCircumference = circumference;
+    print('Wheel circumference set to: ${_wheelCircumference}m');
+  }
 
   Future<void> startScan(SensorType sensorType) async {
     _currentScanType = sensorType;
 
-    // Check if permissions are granted before scanning
     if (!await _requestPermissions()) {
       print('Bluetooth permissions not granted');
       return;
@@ -116,10 +99,7 @@ class PowerMeterService {
       _isScanning = true;
 
       try {
-        // Stop any ongoing scan first
         await FlutterBluePlus.stopScan();
-
-        // Start new scan
         await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
         print('Started scanning for ${sensorType.toString()}');
 
@@ -127,7 +107,6 @@ class PowerMeterService {
           final newDevices = <BluetoothDevice>[];
           for (ScanResult r in results) {
             if (!_foundDevices.any((device) => device.id == r.device.id)) {
-              // Case-insensitive check + null safety
               final deviceName = r.device.name ?? '';
               final advData = r.advertisementData;
 
@@ -166,7 +145,6 @@ class PowerMeterService {
           }
         });
 
-        // Auto-stop after timeout
         Timer(const Duration(seconds: 10), () {
           if (_isScanning) {
             stopScan();
@@ -181,8 +159,22 @@ class PowerMeterService {
   }
 
   double _calculateSpeedFromCscData(int cumulativeRevs, int eventTime) {
-    // FIX: Use instance variables instead of local variables
-    // If we have previous data, calculate speed
+    // If we're getting the same data repeatedly for too long, assume we've stopped
+    if (cumulativeRevs == _lastCumulativeWheelRevs && eventTime == _lastWheelEventTime) {
+      _duplicateCount++;
+      if (_duplicateCount > 5) { // Increased threshold for more stability
+        print('Persistent duplicate data - setting speed to 0');
+        _resetSpeedBuffer();
+        return 0.0;
+      }
+      // Return smoothed speed for a few duplicate readings
+      return _calculateSmoothedSpeed();
+    } else {
+      _duplicateCount = 0;
+    }
+
+    double calculatedSpeed = _lastSpeed;
+
     if (_lastCumulativeWheelRevs > 0 && _lastWheelEventTime > 0) {
       try {
         int revsDifference = cumulativeRevs - _lastCumulativeWheelRevs;
@@ -190,29 +182,31 @@ class PowerMeterService {
 
         // Handle time rollover (eventTime is 16-bit, rolls over every 64 seconds)
         if (timeDifference < 0) {
-          timeDifference += 65536; // 2^16
+          timeDifference += 65536;
         }
 
-        // Convert time from 1/1024 seconds to hours
+        // If no revolutions in a reasonable time, we've stopped
+        if (revsDifference == 0 && timeDifference > 3072) { // 3 seconds at 1024Hz
+          print('No wheel revolutions for 3+ seconds - setting speed to 0');
+          _resetSpeedBuffer();
+          return 0.0;
+        }
+
         double timeInHours = timeDifference / (1024.0 * 3600.0);
 
-        if (timeInHours > 0 && revsDifference >= 0) {
-          // Default wheel circumference in meters (typical road bike)
-          double wheelCircumference = 2.1;
+        if (timeInHours > 0 && revsDifference > 0) {
+          // Use user's wheel circumference
+          double wheelCircumference = _wheelCircumference;
 
           // Distance = revolutions * circumference
           double distance = revsDifference * wheelCircumference / 1000.0; // Convert to km
+          double rawSpeed = distance / timeInHours;
 
-          // Speed = distance / time
-          double speed = distance / timeInHours;
-
-          // Filter out unrealistic speeds (0-100 km/h range)
-          if (speed >= 0 && speed <= 100) {
-            _lastSpeed = speed;
-            print('Calculated speed: ${speed.toStringAsFixed(1)} km/h');
-            return speed;
+          if (rawSpeed >= 0 && rawSpeed <= 100) {
+            calculatedSpeed = rawSpeed;
+            _lastValidSpeedTime = DateTime.now();
           } else {
-            return _lastSpeed; // Return last valid speed
+            print('Invalid speed calculation: ${rawSpeed.toStringAsFixed(1)} km/h');
           }
         }
       } catch (e) {
@@ -220,11 +214,102 @@ class PowerMeterService {
       }
     }
 
-    // Update previous values
     _lastCumulativeWheelRevs = cumulativeRevs;
     _lastWheelEventTime = eventTime;
 
-    return _lastSpeed;
+    return calculatedSpeed;
+  }
+
+  // Helper method to reset speed buffer
+  void _resetSpeedBuffer() {
+    _speedBuffer.clear();
+    _lastSpeed = 0.0;
+  }
+
+  // Updated speed parsing with smoothing
+  void _parseSpeedData(List<int> value) {
+    if (value.length >= 7) {
+      try {
+        int flags = value[0];
+        int cumulativeWheelRevolutions = (value[4] << 24) |
+        (value[3] << 16) |
+        (value[2] << 8) |
+        value[1];
+        int lastWheelEventTime = (value[6] << 8) | value[5];
+
+        print('CSC Data - Cumulative Revs: $cumulativeWheelRevolutions, Event Time: $lastWheelEventTime');
+
+        double instantaneousSpeed = _calculateSpeedFromCscData(cumulativeWheelRevolutions, lastWheelEventTime);
+
+        // Reset the speed reset timer since we got new data
+        _speedResetTimer?.cancel();
+
+        if (instantaneousSpeed > 0.5) { // Only consider speeds above 0.5 km/h as valid movement
+          _lastValidSpeedTime = DateTime.now();
+
+          // Add to smoothing buffer
+          _speedBuffer.add(instantaneousSpeed);
+
+          // Keep buffer at fixed size
+          if (_speedBuffer.length > _speedBufferSize) {
+            _speedBuffer.removeAt(0);
+          }
+
+          // Calculate smoothed speed (weighted average of buffer)
+          double smoothedSpeed = _calculateSmoothedSpeed();
+
+          // Set up timer to reset speed if no updates for 4 seconds
+          _speedResetTimer = Timer(Duration(seconds: 4), () {
+            print('No speed updates for 4 seconds - resetting to 0');
+            _resetSpeedBuffer();
+            _speedController.add(0.0);
+          });
+
+          _lastSpeed = smoothedSpeed;
+          print('Smoothed speed: ${smoothedSpeed.toStringAsFixed(1)} km/h (raw: ${instantaneousSpeed.toStringAsFixed(1)})');
+          _speedController.add(smoothedSpeed);
+        } else {
+          // Speed is 0 or very low
+          if (_lastValidSpeedTime != null &&
+              DateTime.now().difference(_lastValidSpeedTime!).inSeconds > 3) {
+            // If it's been more than 3 seconds since valid movement, reset to 0
+            print('No valid movement for 3+ seconds - resetting to 0');
+            _resetSpeedBuffer();
+            _speedController.add(0.0);
+          } else {
+            // Otherwise, use smoothed deceleration
+            double smoothedSpeed = _calculateSmoothedSpeed();
+            if (smoothedSpeed > 0.5) {
+              _speedController.add(smoothedSpeed);
+            } else {
+              _speedController.add(0.0);
+            }
+          }
+        }
+
+      } catch (e) {
+        print('Error parsing speed data: $e');
+      }
+    } else {
+      print('Invalid CSC data length: ${value.length}');
+    }
+  }
+
+  // Calculate smoothed speed using weighted average (more recent = higher weight)
+  double _calculateSmoothedSpeed() {
+    if (_speedBuffer.isEmpty) return 0.0;
+    if (_speedBuffer.length == 1) return _speedBuffer.first;
+
+    double total = 0.0;
+    double weightSum = 0.0;
+
+    for (int i = 0; i < _speedBuffer.length; i++) {
+      double weight = (i + 1).toDouble(); // Linear weighting: recent samples have higher weight
+      total += _speedBuffer[i] * weight;
+      weightSum += weight;
+    }
+
+    return total / weightSum;
   }
 
   Future<bool> _requestPermissions() async {
@@ -283,11 +368,9 @@ class PowerMeterService {
         _connectionErrors[sensorType] = true;
       });
 
-      // Connect with timeout
       await device.connect(timeout: const Duration(seconds: 15));
       print('Device connection established, discovering services...');
 
-      // Wait a bit for connection to stabilize
       await Future.delayed(const Duration(milliseconds: 1000));
 
       await _discoverServices(sensorType);
@@ -299,7 +382,6 @@ class PowerMeterService {
       _connectionStatus[sensorType] = "Error: ${e.toString()}";
       _connectionErrors[sensorType] = true;
 
-      // Try to disconnect if connection failed
       try {
         await device.disconnect();
       } catch (disconnectError) {
@@ -335,17 +417,12 @@ class PowerMeterService {
                 _characteristics[sensorType] = characteristic;
                 await characteristic.setNotifyValue(true);
                 characteristic.value.listen(_parsePowerData);
-
-                // Update connection status for power meter
                 _connectionStatus[sensorType] = "Connected";
                 _connectionErrors[sensorType] = false;
-
-                // IMPORTANT: Force cadence to show as connected from power meter
                 _cadenceFromPowerMeter = true;
                 _connectionStatus[SensorType.cadence] = "Connected (Power Meter)";
                 _connectionErrors[SensorType.cadence] = false;
 
-                // Reset cadence calculation variables
                 _lastCumulativeRevs = 0;
                 _lastEventTime = 0;
                 _lastCadence = 0;
@@ -354,8 +431,7 @@ class PowerMeterService {
                 print('✅ Power meter connected and cadence setup complete');
                 print('🔧 Cadence will be calculated from power meter data');
 
-                // Force a status update to the UI
-                _cadenceController.add(0); // Add initial value to trigger stream
+                _cadenceController.add(0);
               }
               break;
             case SensorType.heartRate:
@@ -439,51 +515,68 @@ class PowerMeterService {
           _powerController.add(power);
         }
 
+        // RESET: Clear cadence buffer when power is 0 (not pedaling)
         if (power == 0) {
           print('⚡ Power is 0, setting cadence to 0');
-          _cadenceBuffer.clear(); // Clear buffer when not pedaling
           _cadenceController.add(0);
+          _lastCadence = 0;
           return;
         }
 
-        // SPECIAL 4IIII PARSING - Try to extract cadence even without the flag
-        if (value.length >= 10) {
-          print('=== ATTEMPTING 4IIII CADENCE EXTRACTION ===');
+        if (value.length >= 8) {
+          print('=== PROPER 4IIII CADENCE EXTRACTION ===');
 
-          // 4iiii often puts cadence data in bytes 4-9 even without the flag
-          // Let's try to interpret bytes 4-9 as crank data
-          int cumulativeCrankRevolutions = (value[7] << 24) |
-          (value[6] << 16) |
-          (value[5] << 8) |
-          value[4];
 
-          int lastCrankEventTime = (value[9] << 8) | value[8];
+          bool hasCrankData = (flags & 0x02) != 0;
+          print('Crank data present: $hasCrankData');
 
-          print('Potential Crank Revolutions: $cumulativeCrankRevolutions');
-          print('Potential Crank Event Time: $lastCrankEventTime');
+          if (hasCrankData) {
+            int cumulativeCrankRevolutions = (value[5] << 8) | value[4];
+            int lastCrankEventTime = (value[7] << 8) | value[6];
+            print('Crank Revolutions: $cumulativeCrankRevolutions');
+            print('Crank Event Time: $lastCrankEventTime');
+            int cadence = _calculateCadenceFromCrankData(cumulativeCrankRevolutions, lastCrankEventTime);
 
-          // Calculate cadence if the values look reasonable
-          if (cumulativeCrankRevolutions < 1000000 && lastCrankEventTime < 65536) {
-            int cadence = _calculateCadenceFromPowerMeter(
-                cumulativeCrankRevolutions,
-                lastCrankEventTime
-            );
-
-            if (cadence > 0 && cadence < 255) {
-              print('🎯 4iiii Cadence extracted: $cadence RPM');
+            if (cadence >= 30 && cadence <= 170) {
+              print('🎯 4iiii Cadence (from crank data): $cadence RPM');
               _cadenceController.add(cadence);
+              return;
             } else {
-              print('⚠️  Calculated cadence out of range: $cadence RPM');
-
-              // Try alternative interpretation - sometimes it's just 2 bytes for revolutions
-              _tryAlternative4iiiiParsing(value);
+              print('⚠️ Cadence out of 4iiii range: $cadence RPM');
             }
-          } else {
-            print('❌ Values look unreasonable, trying alternative parsing...');
-            _tryAlternative4iiiiParsing(value);
           }
-        } else {
-          print('❌ Data too short for 4iiii parsing: ${value.length} bytes');
+
+          print('=== TRYING 4IIII FALLBACK PARSING ===');
+
+
+          for (int offset = 4; offset <= value.length - 4; offset++) {
+            try {
+              int revs = (value[offset + 1] << 8) | value[offset];
+              int time = (value[offset + 3] << 8) | value[offset + 2];
+
+              if (revs < 10000 && time < 65536 && time > 0) {
+                int cadence = _calculateCadenceFromCrankData(revs, time);
+                if (cadence >= 30 && cadence <= 170) {
+                  print('🎯 4iiii Cadence (fallback offset $offset): $cadence RPM');
+                  _cadenceController.add(cadence);
+                  return;
+                }
+              }
+            } catch (e) {
+              continue;
+            }
+          }
+
+          if (value.length >= 5) {
+            int directCadence = value[4];
+            if (directCadence >= 30 && directCadence <= 170) {
+              print('🎯 4iiii Cadence (direct): $directCadence RPM');
+              _cadenceController.add(directCadence);
+              return;
+            }
+          }
+
+          print('❌ No valid cadence data found in 4iiii power meter');
         }
 
       } catch (e) {
@@ -495,112 +588,8 @@ class PowerMeterService {
     print('=== END POWER METER DATA ===\n');
   }
 
-  void _tryAlternative4iiiiParsing(List<int> value) {
-    print('=== TRYING ALTERNATIVE 4IIII PARSING ===');
-
-    // Alternative 1: Try interpreting as simple cadence value
-    if (value.length >= 6) {
-      // Sometimes cadence is just a single byte or two bytes
-      int rawCadence = value[4]; // Try byte 4 as direct cadence value
-
-      if (rawCadence > 0 && rawCadence < 255) {
-        // Apply smoothing with moving average
-        int smoothedCadence = _calculateSmoothedCadence(rawCadence);
-
-        print('🎯 Raw cadence: $rawCadence RPM | Smoothed: $smoothedCadence RPM');
-        _cadenceController.add(smoothedCadence);
-        return;
-      }
-    }
-
-    // Alternative 2: Try different byte combinations for crank data
-    if (value.length >= 8) {
-      for (int i = 4; i <= value.length - 4; i++) {
-        try {
-          int revs = (value[i+3] << 24) | (value[i+2] << 16) | (value[i+1] << 8) | value[i];
-          int time = (value[i+5] << 8) | value[i+4];
-
-          if (revs < 100000 && time < 65536 && time > 0) {
-            int cadence = _calculateCadenceFromPowerMeter(revs, time);
-            if (cadence > 10 && cadence < 250) {
-              int smoothedCadence = _calculateSmoothedCadence(cadence);
-              print('🎯 Alternative 2 - Raw cadence: $cadence RPM | Smoothed: $smoothedCadence RPM');
-              _cadenceController.add(smoothedCadence);
-              return;
-            }
-          }
-        } catch (e) {
-          continue;
-        }
-      }
-    }
-
-    // Alternative 3: Try to detect cadence from power pattern changes
-    _detectCadenceFromPowerPattern();
-
-    print('❌ No cadence data found in alternative parsing');
-  }
-
-  int _calculateSmoothedCadence(int rawCadence) {
-    // Add new reading to buffer
-    _cadenceBuffer.add(rawCadence);
-
-    // Remove oldest reading if buffer is full
-    if (_cadenceBuffer.length > _cadenceBufferSize) {
-      _cadenceBuffer.removeAt(0);
-    }
-
-    // Calculate moving average
-    if (_cadenceBuffer.isEmpty) return rawCadence;
-
-    int sum = _cadenceBuffer.reduce((a, b) => a + b);
-    int average = sum ~/ _cadenceBuffer.length;
-
-    // Apply additional smoothing for more stable values
-    if (_lastCadence > 0) {
-      // Only allow gradual changes (max ±10 RPM change from previous smoothed value)
-      int maxChange = 10;
-      if (average.abs() - _lastCadence.abs() > maxChange) {
-        // If change is too drastic, move gradually toward the new value
-        if (average > _lastCadence) {
-          average = _lastCadence + maxChange;
-        } else {
-          average = _lastCadence - maxChange;
-        }
-      }
-
-      // Additional: filter out obviously wrong values (like 227 RPM when you're at 80)
-      if (rawCadence > 120 && _lastCadence < 100) {
-        // If we suddenly jump to very high cadence, it's probably wrong
-        average = _lastCadence; // Keep previous value
-        print('🛡️  Filtered out unlikely cadence jump: $rawCadence RPM');
-      }
-    }
-
-    print('📊 Cadence smoothing: ${_cadenceBuffer.length} samples, Raw: $rawCadence, Smoothed: $average');
-    return average;
-  }
-
-  void _detectCadenceFromPowerPattern() {
-    // Simple cadence estimation based on power fluctuations
-    // This is a fallback when no cadence data is available
-    if (_powerHistory.length >= 3) {
-      // Calculate variance in recent power readings
-      var recentPower = _powerHistory.sublist(_powerHistory.length - 3);
-      var avg = recentPower.reduce((a, b) => a + b) / recentPower.length;
-      var variance = recentPower.map((p) => pow(p - avg, 2)).reduce((a, b) => a + b) / recentPower.length;
-
-      // If there's significant variance, estimate cadence based on typical patterns
-      if (variance > 100) { // High variance suggests pedaling
-        int estimatedCadence = 70 + (Random().nextInt(30)); // Estimate 70-100 RPM
-        print('🔄 Estimating cadence from power pattern: ~$estimatedCadence RPM');
-        _cadenceController.add(estimatedCadence);
-      }
-    }
-  }
-
-  int _calculateCadenceFromPowerMeter(int cumulativeRevs, int eventTime) {
-    print('🔧 Calculating cadence from:');
+  int _calculateCadenceFromCrankData(int cumulativeRevs, int eventTime) {
+    print('🔧 Calculating cadence from crank data:');
     print('   Current revs: $cumulativeRevs, Current time: $eventTime');
     print('   Previous revs: $_lastCumulativeRevs, Previous time: $_lastEventTime');
 
@@ -617,47 +606,46 @@ class PowerMeterService {
       int revsDifference = cumulativeRevs - _lastCumulativeRevs;
       int timeDifference = eventTime - _lastEventTime;
 
-      // Handle time rollover
+      // Handle time rollover (eventTime is 16-bit, rolls over every 64 seconds)
       if (timeDifference < 0) {
-        timeDifference += 65536;
+        timeDifference += 65536; // 2^16
         print('   ⏰ Time rollover handled: $timeDifference');
       }
 
       // Only calculate if we have meaningful data
-      if (timeDifference > 0 && revsDifference >= 0) {
+      if (timeDifference > 0 && revsDifference > 0) {
         double timeInMinutes = timeDifference / (1024.0 * 60.0);
 
-        if (timeInMinutes > 0.001) { // At least 0.06 seconds
+        if (timeInMinutes > 0.001) {
           int cadence = (revsDifference / timeInMinutes).round();
-          print('   🎯 Raw cadence: $cadence RPM (${revsDifference} revs in ${timeDifference}/1024s)');
+          print('   🎯 Raw cadence calculation: $cadence RPM (${revsDifference} revs in ${timeDifference}/1024s)');
 
-          // Reasonable cadence range
-          if (cadence >= 10 && cadence <= 250) {
-            _lastCadence = cadence;
-            print('   ✅ Valid cadence: $cadence RPM');
 
-            // Update previous values
+          if (cadence >= 30 && cadence <= 170) {
+            print('   ✅ Valid 4iiii cadence: $cadence RPM');
+
             _lastCumulativeRevs = cumulativeRevs;
             _lastEventTime = eventTime;
+            _lastCadence = cadence;
 
             return cadence;
           } else {
-            print('   ⚠️  Cadence out of range: $cadence RPM');
+            print('   ⚠️ Cadence outside 4iiii range: $cadence RPM');
           }
         } else {
-          print('   ⚠️  Time difference too small: $timeInMinutes minutes');
+          print('   ⚠️ Time difference too small: $timeInMinutes minutes');
         }
       } else {
-        print('   ⚠️  No movement or invalid time difference');
+        print('   ⚠️ No movement or invalid time difference');
       }
     } else {
       print('   🔄 Same data as previous reading');
     }
 
-    // Return last valid cadence if current calculation fails
     print('   📍 Returning last valid cadence: $_lastCadence RPM');
     return _lastCadence;
   }
+
 
   void _parseHeartRateData(List<int> value) {
     if (value.isNotEmpty) {
@@ -672,25 +660,17 @@ class PowerMeterService {
   }
 
   void _parseCadenceData(List<int> value) {
-    // Always skip if cadence is provided by power meter
     if (_cadenceFromPowerMeter) {
-      return; // Completely ignore separate cadence sensor data
+      return;
     }
 
     if (value.length >= 7) {
       try {
-        // Parse CSC data for cadence
         int flags = value[0];
 
-        // Check if cadence data is present (bit 1 of flags)
         if ((flags & 0x02) != 0 && value.length >= 7) {
-          // Cumulative Crank Revolutions (UINT16) - little endian
           int cumulativeCrankRevolutions = (value[3] << 8) | value[2];
-
-          // Last Crank Event Time (UINT16) - little endian
           int lastCrankEventTime = (value[5] << 8) | value[4];
-
-          // Calculate cadence
           int cadence = _calculateCadenceFromCscData(cumulativeCrankRevolutions, lastCrankEventTime);
 
           if (cadence > 0 && cadence < 255) {
@@ -705,7 +685,6 @@ class PowerMeterService {
   }
 
   int _calculateCadenceFromCscData(int cumulativeRevs, int eventTime) {
-    // FIX: Use separate instance variables for CSC cadence
     int _lastCumulativeRevsCsc = 0;
     int _lastEventTimeCsc = 0;
     int _lastCadenceCsc = 0;
@@ -715,18 +694,13 @@ class PowerMeterService {
         int revsDifference = cumulativeRevs - _lastCumulativeRevsCsc;
         int timeDifference = eventTime - _lastEventTimeCsc;
 
-        // Handle time rollover
         if (timeDifference < 0) {
           timeDifference += 65536;
         }
 
         if (timeDifference > 0) {
-          // Cadence = (revolutions / time in minutes)
-          // timeDifference is in 1/1024 seconds
           double timeInMinutes = timeDifference / (1024.0 * 60.0);
           int cadence = (revsDifference / timeInMinutes).round();
-
-          // Valid cadence range
           if (cadence > 0 && cadence < 255) {
             _lastCadenceCsc = cadence;
             return cadence;
@@ -741,39 +715,6 @@ class PowerMeterService {
     _lastEventTimeCsc = eventTime;
 
     return _lastCadenceCsc;
-  }
-
-  void _parseSpeedData(List<int> value) {
-    if (value.length >= 7) {
-      try {
-        // Parse CSC (Cycling Speed and Cadence) data according to Bluetooth spec
-        // Flags byte
-        int flags = value[0];
-
-        // Cumulative Wheel Revolutions (UINT32) - little endian
-        int cumulativeWheelRevolutions = (value[4] << 24) |
-        (value[3] << 16) |
-        (value[2] << 8) |
-        value[1];
-
-        // Last Wheel Event Time (UINT16) - little endian (1/1024 seconds)
-        int lastWheelEventTime = (value[6] << 8) | value[5];
-
-        print('CSC Data - Cumulative Revs: $cumulativeWheelRevolutions, Event Time: $lastWheelEventTime');
-
-        // Calculate speed based on wheel revolutions and time
-        double speed = _calculateSpeedFromCscData(cumulativeWheelRevolutions, lastWheelEventTime);
-
-        if (speed >= 0) {
-          _speedController.add(speed);
-        }
-
-      } catch (e) {
-        print('Error parsing speed data: $e');
-      }
-    } else {
-      print('Invalid CSC data length: ${value.length}');
-    }
   }
 
   Future<void> disconnect(SensorType sensorType) async {
@@ -793,7 +734,6 @@ class PowerMeterService {
       _connectionStatus[sensorType] = "Disconnected";
       _connectionErrors[sensorType] = false;
 
-      // Reset cadence source if disconnecting power meter
       if (sensorType == SensorType.powerMeter && _cadenceFromPowerMeter) {
         _cadenceFromPowerMeter = false;
         _connectionStatus[SensorType.cadence] = "Not connected";
@@ -823,5 +763,6 @@ class PowerMeterService {
     _heartRateController.close();
     _cadenceController.close();
     _speedController.close();
+    _speedResetTimer?.cancel();
   }
 }
